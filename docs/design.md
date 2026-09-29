@@ -73,6 +73,16 @@
 4. **迁移只前进不后退**：每个迁移文件只做 `up`，不做 `down`；回滚靠备份恢复。
 5. **时间一律以 UTC ISO 8601 字符串存库**，本地化只在展示层与日界计算处发生。
 
+### 2.3 实现期新增的硬约束（编码时必须遵守）
+
+| 约束 | 原因（均为实测踩坑，非推测） |
+| --- | --- |
+| **`migrations/*.sql` 必须是纯 ASCII** | SQLite 的 `exec()` 从字节 0 开始解析，文件开头的非 ASCII 注释（例如全角括号）会让解析器误判，报出极具误导性的 `near "/": syntax error`。中文说明写在设计文档与 TS 注释里，SQL 内只用英文注释 |
+| **不使用 TS `enum`** | Node 的原生类型剥离不支持它（会抛 `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`）。枚举一律用 `as const` 数组，同时承载编译期联合类型与运行时取值集合 |
+| **`node:sqlite` 调用点必须集中** | `node:sqlite` 的 `get()`/`all()` 返回 `unknown`，形状断言只在 `db/connection.ts` 的 `queryOne`/`queryAll` 与各 `repo` 内出现，避免 `as` 散布到业务层 |
+| **相对导入必须带 `.ts` 扩展名** | Node ESM 不做扩展名补全；同时 `tsconfig` 开启 `allowImportingTsExtensions` |
+| **迁移文件数与 `SCHEMA_VERSION` 必须同步** | 由 `assertSchemaVersionInSync()` 在 `migrate()` 入口强制校验，忘改常量会立即报错而不是静默错位 |
+
 ---
 
 ## 3. 目录结构
@@ -693,19 +703,47 @@ ai.splitProposal(input)  →  SplitProposal {
 
 ## 11. M0 任务清单（按提交顺序）
 
-| # | 任务 | 产出 | 完成判据 |
-| --- | --- | --- | --- |
-| T1 | 工程骨架 | `package.json`（零依赖）、`tsconfig.json`（仅编辑器提示）、目录树 | `node src/cli/wh.ts --version` 有输出 |
-| T2 | 数据层 | `db/connection.ts`、`migrations.ts`、`001_init.sql` | 空库一键建表；`user_version=1`；重复运行幂等 |
-| T3 | 日界与日期解析 | `day/dayKey.ts`、`day/parseDate.ts` | §10 两个测试文件全绿 |
-| T4 | 领域规则 | `domain/types.ts`、`errors.ts`、`rules.ts` | 状态机测试全绿 |
-| T5 | 仓储层 | `repo/*`（9 个模块） | 每个 repo 有覆盖 CRUD + 软删除的单测 |
-| T6 | 服务层 | `capture`、`planning`、`tracking`、`journal`、`search`、`system` | 服务级单测全绿（含收件箱清空与撤销） |
-| T7 | CLI 验证器 | `cli/wh.ts`、`cli/verify.ts` | 能在无界面情况下登记、分类、写日志并自检通过 |
-| T8 | 本地服务与界面 | `ui/server.ts` + 四个页签 | **连续 3 天真实使用**（M0 验收，见需求 §8） |
-| T9 | 备份与回收站 | `service/backup.ts`、`repo/trash.ts` | 快照生成、轮换、恢复、30 天清理测试通过 |
+| # | 任务 | 产出 | 完成判据 | 状态 |
+| --- | --- | --- | --- | --- |
+| T1 | 工程骨架 | `package.json`（零依赖）、`tsconfig.json`（仅编辑器提示）、目录树 | `node src/cli/wh.ts --version` 有输出 | ✅ 已完成 |
+| T2 | 数据层 | `db/connection.ts`、`migrations.ts`、`001_init.sql` | 空库一键建表；`user_version=1`；重复运行幂等 | ✅ 已完成 |
+| T3 | 日界与日期解析 | `day/dayKey.ts`、`day/parseDate.ts` | §10 两个测试文件全绿 | ✅ 已完成 |
+| T4 | 领域规则 | `domain/types.ts`、`errors.ts`、`rules.ts` | 状态机测试全绿 | ✅ 已完成 |
+| T5 | 仓储层 | `repo/*`（9 个模块） | 每个 repo 有覆盖 CRUD + 软删除的单测 | ⬜ 待开始 |
+| T6 | 服务层 | `capture`、`planning`、`tracking`、`journal`、`search`、`system` | 服务级单测全绿（含收件箱清空与撤销） | ⬜ 待开始 |
+| T7 | CLI 验证器 | `cli/wh.ts`、`cli/verify.ts` | 能在无界面情况下登记、分类、写日志并自检通过 | ⬜ 待开始 |
+| T9 | 备份与回收站 | `service/backup.ts`、`repo/trash.ts` | 快照生成、轮换、恢复、30 天清理测试通过 | ⬜ 待开始 |
+| T8 | 本地服务与界面 | `ui/server.ts` + 四个页签 | **连续 3 天真实使用**（M0 验收，见需求 §8） | ⬜ 待开始 |
+
+> 顺序说明：T9 提到 T8 之前，因为备份与回收站属于数据安全底线，
+> 应当在"开始往里存真实数据"之前就位。
 
 **M0 完成判据（不可妥协）**：我能连续 3 天用它登记与推进工作，且过程中没有丢过任何一条记录。
+
+### 11.1 T1–T4 实际交付（已完成）
+
+| 项 | 结果 |
+| --- | --- |
+| 测试 | **55 项全部通过**（`node --test tests/`），零测试框架依赖 |
+| 依赖 | `dependencies` 为空，`node_modules` 不存在 |
+| 构建步骤 | 无需构建，`node src/cli/wh.ts` 直接运行 |
+| CLI 可用命令 | `--version`、`migrate`、`status`、`verify`、`help` |
+| 数据库自检 | `PRAGMA integrity_check` = ok，外键孤儿 0 条 |
+
+测试分布：`dayKey` 13 项（跨年/跨月/闰年/时区偏移/区间边界）、
+`parseDate` 14 项（含 8 条反例）、`migrations` 15 项（CHECK/级联/部分索引/事务回滚）、
+`rules` 13 项（状态流转矩阵与非法流转）。
+
+**实现期发现并修复的三个真实缺陷**（均已写入测试固化）：
+
+1. **SQL 文件含非 ASCII 注释导致建表失败**——见 §2.3 第一条。
+2. **星期语义歧义**：`下周X` 必须解释为"下一个自然周的星期 X"，
+   而不是"最近一次出现的星期 X"。基准日周三说"下周一"，
+   最近一次出现是 5 天后的本周一（仍属同一自然周），而正确结果应是 12 天后的下周一。
+   已把语义写入测试注释，并把函数更名为 `forwardWeekdayOffset`
+   以体现"只向前看、不返回已过去的日期"这条决策。
+3. **迁移版本漂移风险**——新增迁移文件却忘记改 `SCHEMA_VERSION`
+   会让升级判断错位，现由 `assertSchemaVersionInSync()` 强制拦截。
 
 ---
 

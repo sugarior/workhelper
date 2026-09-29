@@ -6,7 +6,19 @@
 
 ## 当前状态
 
-**需求澄清阶段已完成，尚未开工。** 本轮交付的是需求与目标文档。
+**M0 进行中**：T1–T4 已完成（工程骨架、数据层、日界与日期解析、领域规则），55 项测试全部通过。
+尚无界面，可通过 CLI 验证数据库与迁移。
+
+```
+node src/cli/wh.ts --version    # 版本
+node src/cli/wh.ts migrate      # 建库 / 升级结构（幂等）
+node src/cli/wh.ts status       # 数据库与迁移状态
+node src/cli/wh.ts verify       # 完整性自检
+node --test tests/              # 运行全部测试
+```
+
+**零依赖、零构建**：`dependencies` 为空，不需要 `npm install`，也不需要编译步骤
+（Node 26 原生运行 TypeScript，内置 `node:sqlite`）。
 
 ## 文档
 
