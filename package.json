@@ -1,0 +1,15 @@
+{
+  "name": "workhelper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "常驻桌面的个人工作秘书：零摩擦捕获、结构化拆解、记录即资产",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "wh": "node src/cli/wh.ts",
+    "test": "node --test tests/",
+    "verify": "node src/cli/wh.ts verify"
+  }
+}

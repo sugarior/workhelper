@@ -29,6 +29,3 @@ backups/
 Thumbs.db
 desktop.ini
 $RECYCLE.BIN/
-
-# 临时探测文件
-.probe.md
