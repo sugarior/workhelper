@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -265,17 +265,27 @@ test('CLI：回收站可列表、恢复与彻底删除', () => {
   });
 });
 
-test('CLI：备份生成文件并可轮换', () => {
+test('CLI：备份生成文件，且同秒内连续备份不互相覆盖', () => {
   withDataDir((dataDir) => {
     run(dataDir, 'add', '备份前的数据');
+
     const first = run(dataDir, 'backup');
     assert.equal(first.status, 0, first.stderr);
-    assert.match(first.stdout, /备份完成：wh-\d{8}-\d{6}-manual\.db/);
+    assert.match(first.stdout, /备份完成：wh-\d{8}-\d{6}-manual(?:-\d+)?\.db/);
 
-    // 同一秒内连续备份不能互相覆盖
+    // 第二次是在另一个进程里跑的，可能已跨到下一秒。
+    // 跨秒时文件名本就该是 -manual.db；同秒时才需要 -manual-1.db 这样的后缀。
+    // 两种都正确，真正要保证的是"两次备份得到两个文件，后者没覆盖前者"。
     const second = run(dataDir, 'backup');
-    assert.equal(second.status, 0);
-    assert.match(second.stdout, /manual-1\.db/);
+    assert.equal(second.status, 0, second.stderr);
+
+    const backupsDir = join(dataDir, 'backups');
+    const files = readdirSync(backupsDir);
+    assert.equal(files.length, 2, `两次备份应产生两个文件，实际 ${files.join(', ')}`);
+    assert.notEqual(files[0], files[1]);
+    for (const file of files) {
+      assert.ok(statSync(join(backupsDir, file)).size > 0, `${file} 不应为空`);
+    }
   });
 });
 
