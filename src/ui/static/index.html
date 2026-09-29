@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WorkHelper 工作秘书</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="top">
+    <span class="brand">工作秘书</span>
+    <nav class="tabs" id="tabs">
+      <button data-tab="inbox">收件箱<span class="badge zero" id="badge-inbox">0</span></button>
+      <button data-tab="today">今日</button>
+      <button data-tab="projects">项目</button>
+      <button data-tab="log">日志</button>
+    </nav>
+    <div class="search-box">
+      <input type="search" id="search" placeholder="搜索（中文子串可用）" autocomplete="off">
+      <button id="quick-capture" title="打开快记窗">＋ 快记</button>
+    </div>
+  </header>
+
+  <main id="view"></main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

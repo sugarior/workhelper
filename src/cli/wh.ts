@@ -12,13 +12,13 @@ import { openDatabase, closeDatabase, DEFAULT_DB_FILENAME } from '../core/db/con
 import { migrate, currentVersion, listMigrations } from '../core/db/migrations.ts';
 import { createServices } from '../core/service/index.ts';
 import { isDomainError } from '../core/domain/errors.ts';
+import { defaultDataDir, resolveFromRoot } from '../core/paths.ts';
 import { resolveRef } from './refs.ts';
 import { runVerify } from './verify.ts';
 import type { WorkHelperServices, ClassifyTarget } from '../core/service/index.ts';
 import type { ArchiveKind, ProgressKind, Task, TaskStatus } from '../core/domain/types.ts';
 
 const VERSION = '0.1.0';
-const DEFAULT_DATA_DIR = 'data';
 
 const HELP = `WorkHelper ${VERSION} —— 常驻桌面的个人工作秘书
 
@@ -68,8 +68,9 @@ const HELP = `WorkHelper ${VERSION} —— 常驻桌面的个人工作秘书
   --version                 显示版本
 
 通用选项
-  --db <路径>               数据库文件，默认 ${DEFAULT_DATA_DIR}/${DEFAULT_DB_FILENAME}
-  --data <目录>             数据目录（备份所在），默认 ${DEFAULT_DATA_DIR}
+  --db <路径>               数据库文件，默认 <项目根>/${DEFAULT_DB_FILENAME}
+  --data <目录>             数据目录（备份所在），默认 <项目根>/data
+                            相对路径的解释基准是项目根，不随当前目录变化
   --json                    以 JSON 输出，便于脚本处理
 `;
 
@@ -167,14 +168,15 @@ function oneOf<T extends string>(
 
 function commandAdd(context: CliContext, text: string, kindRaw: string | undefined): void {
   const kindHint = oneOf(kindRaw, ['todo', 'note'] as const, 'kind') ?? null;
-  const { item, parsed } = context.services.capture.quickCapture({ text, kindHint });
+  const { item, parsed, title } = context.services.capture.quickCapture({ text, kindHint });
 
   if (context.json) {
-    console.log(JSON.stringify({ item, parsed }, null, 2));
+    console.log(JSON.stringify({ item, parsed, title }, null, 2));
     return;
   }
   const suffix = parsed === null ? '' : `  → 截止 ${parsed.dayKey}`;
-  console.log(`已记入收件箱 ${shortId(item.id)}${suffix}`);
+  console.log(`已记入收件箱 ${shortId(item?.id ?? '')}${suffix}`);
+  if (title.length > 0 && title !== text.trim()) console.log(`标题：${title}`);
   console.log(`待处理共 ${context.services.capture.countPending()} 条`);
 }
 
@@ -610,8 +612,12 @@ async function main(): Promise<void> {
     return;
   }
 
-  const dataDir = optionalString(values, 'data') ?? DEFAULT_DATA_DIR;
-  const dbPath = optionalString(values, 'db') ?? join(dataDir, DEFAULT_DB_FILENAME);
+  const dataDir = optionalString(values, 'data') === undefined
+    ? defaultDataDir()
+    : resolveFromRoot(optionalString(values, 'data') ?? '');
+  const dbPath = optionalString(values, 'db') === undefined
+    ? join(dataDir, DEFAULT_DB_FILENAME)
+    : resolveFromRoot(optionalString(values, 'db') ?? '');
   const database = openDatabase(dbPath);
 
   try {

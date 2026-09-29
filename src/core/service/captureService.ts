@@ -70,7 +70,16 @@ function indexInbox(database: DatabaseSync, item: InboxItem): void {
 }
 
 export interface CaptureService {
-  quickCapture(input: { text: string; kindHint?: InboxKindHint | null }): { item: InboxItem; parsed: ParsedDate | null };
+  /**
+   * 快记。
+   * dryRun=true 时只做解析、不写库——快记窗用它实现"边打字边显示截止日"，
+   * 而不必为一个纯预览再造一个只读接口。
+   */
+  quickCapture(input: {
+    text: string;
+    kindHint?: InboxKindHint | null;
+    dryRun?: boolean;
+  }): { item: InboxItem | null; parsed: ParsedDate | null; title: string };
   listPending(options?: { limit?: number }): InboxItem[];
   countPending(): number;
   classify(id: string, target: ClassifyTarget): ClassifyResult;
@@ -142,20 +151,25 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
       const at = nowIso();
       const dayKey = dayKeyFromIso(at, boundaryHour());
       const parsed = parseDate(trimmed, { today: dayKey });
-      const title = parsed === null ? trimmed : stripParsedDate(trimmed, parsed);
+      const stripped = parsed === null ? trimmed : stripParsedDate(trimmed, parsed);
       // 标题被剥离过才保留原文，便于回溯"我当时到底写了什么"
+      const title = stripped.length === 0 ? trimmed : stripped;
       const rawInput = title === trimmed ? null : trimmed;
+
+      if (input.dryRun === true) {
+        return { item: null, parsed, title };
+      }
 
       const item = withTx(database, () =>
         createInboxItem(database, {
-          body: title.length === 0 ? trimmed : title,
+          body: title,
           parsedDue: parsed?.dayKey ?? null,
           kindHint: input.kindHint ?? null,
           rawInput,
         }),
       );
       indexInbox(database, item);
-      return { item, parsed };
+      return { item, parsed, title };
     },
 
     listPending(options = {}) {

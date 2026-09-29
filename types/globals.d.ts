@@ -125,6 +125,7 @@ declare const process: {
   platform: string;
   version: string;
   execPath: string;
+  on(event: 'SIGINT' | 'SIGTERM' | 'exit', listener: () => void): void;
   stdout: { write(chunk: string): boolean };
   stderr: { write(chunk: string): boolean };
 };
@@ -140,3 +141,54 @@ declare module 'node:crypto' {
     update(data: string | Uint8Array): { digest(encoding: 'hex'): string };
   };
 }
+
+declare module 'node:http' {
+  export interface IncomingMessage {
+    method?: string;
+    url?: string;
+    headers: Record<string, string | string[] | undefined>;
+    [Symbol.asyncIterator](): AsyncIterator<unknown>;
+  }
+
+  export interface ServerResponse {
+    statusCode: number;
+    writeHead(status: number, headers?: Record<string, string | number>): this;
+    write(chunk: string | Uint8Array): boolean;
+    end(chunk?: string | Uint8Array): void;
+    setHeader(name: string, value: string | number): void;
+  }
+
+  export interface Server {
+    listen(port: number, host: string, callback?: () => void): this;
+    close(callback?: () => void): this;
+    once(event: 'error', listener: (error: NodeJS.ErrnoException) => void): this;
+    once(event: string, listener: (...args: unknown[]) => void): this;
+  }
+
+  export function createServer(
+    handler: (request: IncomingMessage, response: ServerResponse) => void,
+  ): Server;
+}
+
+declare namespace NodeJS {
+  interface ErrnoException extends Error {
+    code?: string;
+    errno?: number;
+    syscall?: string;
+  }
+}
+
+declare const Buffer: {
+  from(data: string | Uint8Array, encoding?: string): Buffer;
+  concat(chunks: readonly Uint8Array[]): Buffer;
+  byteLength(text: string): number;
+};
+
+interface Buffer extends Uint8Array {
+  readonly length: number;
+  toString(encoding?: string): string;
+}
+
+declare const URL: {
+  new (input: string, base?: string): { pathname: string; searchParams: { get(name: string): string | null } };
+};
