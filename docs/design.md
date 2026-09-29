@@ -1,0 +1,743 @@
+# 工作秘书 WorkHelper — 技术设计文档
+
+| 项目 | 内容 |
+| --- | --- |
+| 文档版本 | v0.1 |
+| 状态 | 设计阶段，待评审后进入 M0 编码 |
+| 上游文档 | [需求与目标文档](requirements.md) · [已有方案调研](research-existing-solutions.md) |
+| 设计范围 | 内核数据模型、服务接口、模块划分、M0 界面契约；桌面壳（Tauri）属 M1 |
+
+---
+
+## 1. 设计目标与约束
+
+需求文档给出的约束，直接决定技术选择：
+
+| 需求约束 | 设计决策 |
+| --- | --- |
+| G1 捕获 ≤ 3 秒、不打断工作 | 快记通路**不经过任何网络 I/O**；写入是单条 INSERT + 一次提交 |
+| 永远不丢已提交记录 | SQLite **WAL** 模式 + 同步写入；`synchronous=NORMAL`（WAL 下断电不丢已提交事务） |
+| 数据是我的 | 单一 `workhelper.db` 文件 + `attachments/` 目录，整体可打包搬走；不依赖任何云 |
+| AI 只是建议 | AI 模块**无法直接写库**，只能产出提案对象，由确认流程调用写入服务 |
+| 内核与界面分离（Q3 预留） | `core/` 不 import 任何界面/HTTP/Tauri 代码；界面层通过服务门面调用 |
+| 单机、个人、无同步 | 不做变更日志/事件溯源，关系表即事实源 |
+
+### 1.1 已验证的技术前提（本机实测）
+
+| 前提 | 实测结果 | 影响 |
+| --- | --- | --- |
+| Node 版本 | v26.10.0 | — |
+| **原生运行 TypeScript** | ✅ `node src/x.ts` 直接跑通（含类型注解、ESM） | **零构建步骤**，不需要 tsc/esbuild/tsx |
+| **`node:sqlite`** | ✅ 可用，SQLite **3.53.4**，中文读写正常 | **零原生编译依赖**，不需要 better-sqlite3 |
+| WebView2 | 153.0.4234.48 | M1 的 Tauri 渲染引擎已就位 |
+| Rust / MSVC | ❌ 缺失 | M1 前安装，M0 不受影响 |
+
+> **由此确定的核心工程约束**：M0 的 `dependencies` 为空。全部使用 Node 内置能力，避免在 Windows 上引入 node-gyp、构建工具链与版本地狱。
+
+---
+
+## 2. 架构
+
+### 2.1 三层结构
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  界面层  ui/            （可整体替换）                          │
+│  M0: 快记窗 + 主界面（极简 HTML，由本地 HTTP 服务提供）           │
+│  M1: Tauri 窗口 / 托盘 / 悬浮组件 / 全局快捷键                   │
+└───────────────────────────┬──────────────────────────────────┘
+                            │  服务门面（进程内函数调用；M1 改用 IPC）
+┌───────────────────────────▼──────────────────────────────────┐
+│  内核层  core/           （无界面依赖、无网络依赖）              │
+│                                                              │
+│   domain/     类型与不变量（Project/Task/Subtask/…）           │
+│   db/         连接、PRAGMA、迁移、事务封装                      │
+│   repo/       每张表的纯 CRUD（SQL 只出现在这一层）              │
+│   service/    业务规则（捕获、拆解、日志汇总、搜索）              │
+│   day/        日界（4 点切日）与日期解析                        │
+│   ai/         AI 适配器（M2）；只产出提案，不写库                 │
+└───────────────────────────┬──────────────────────────────────┘
+                            │
+              ┌─────────────▼─────────────┐
+              │  data/workhelper.db (WAL)  │
+              │  data/attachments/         │
+              │  data/backups/             │
+              └───────────────────────────┘
+```
+
+### 2.2 分层纪律（写成可检查的规则）
+
+1. **SQL 只允许出现在 `core/repo/`**。其它任何目录出现 `db.prepare(` 视为违规。
+2. **`core/` 不得 import `ui/`、`http`、`node:http`**。内核可脱离界面独立运行与测试。
+3. **`ui/` 不得直接访问数据库**，只能调用 `core/service/` 暴露的门面。
+4. **迁移只前进不后退**：每个迁移文件只做 `up`，不做 `down`；回滚靠备份恢复。
+5. **时间一律以 UTC ISO 8601 字符串存库**，本地化只在展示层与日界计算处发生。
+
+---
+
+## 3. 目录结构
+
+```
+WorkHelper/
+├─ docs/
+│  ├─ requirements.md
+│  ├─ research-existing-solutions.md
+│  └─ design.md                    ← 本文
+├─ src/
+│  ├─ core/
+│  │  ├─ domain/
+│  │  │  ├─ types.ts               枚举、实体类型、DTO
+│  │  │  ├─ errors.ts              领域错误（NotFound / InvalidTransition / …）
+│  │  │  └─ rules.ts               状态机与不变量校验
+│  │  ├─ db/
+│  │  │  ├─ connection.ts          打开库、PRAGMA、单例
+│  │  │  ├─ migrations.ts          迁移执行器（基于 user_version）
+│  │  │  ├─ migrations/            001_init.sql、002_xxx.sql …
+│  │  │  └─ tx.ts                  事务包装 withTx()
+│  │  ├─ repo/
+│  │  │  ├─ projects.ts  tasks.ts  subtasks.ts
+│  │  │  ├─ progress.ts  inbox.ts  archives.ts
+│  │  │  ├─ dailyLogs.ts settings.ts search.ts  trash.ts
+│  │  ├─ service/
+│  │  │  ├─ capture.ts             捕获：快记、分类、转任务
+│  │  │  ├─ planning.ts            规划：项目/任务/子任务、拖拽排序
+│  │  │  ├─ tracking.ts            推进：进展记录、状态流转、今日视图
+│  │  │  ├─ journal.ts             日志：自动汇总、补录
+│  │  │  ├─ export.ts              Markdown 导出（M2）
+│  │  │  ├─ backup.ts              启动快照与轮换
+│  │  │  └─ index.ts               服务门面（界面唯一入口）
+│  │  ├─ day/
+│  │  │  ├─ dayKey.ts              4 点切日：本地时间 ↔ 日键
+│  │  │  └─ parseDate.ts           自然语言日期解析（高置信度）
+│  │  ├─ ai/                       （M2）
+│  │  │  ├─ provider.ts            OpenAI 兼容客户端
+│  │  │  ├─ prompts/               拆分 / 日报提示词
+│  │  │  └─ splitProposal.ts       提案对象与校验（不可直接写库）
+│  │  └─ index.ts
+│  ├─ ui/                          （M0 极简，M1 替换为 Tauri 前端）
+│  │  ├─ server.ts                 本地 HTTP：静态资源 + JSON API
+│  │  ├─ static/
+│  │  │  ├─ capture.html           快记窗
+│  │  │  ├─ capture.js
+│  │  │  ├─ main.html              主界面（收件箱 / 今日 / 项目树 / 日志）
+│  │  │  └─ main.js
+│  └─ cli/
+│     ├─ wh.ts                     日常命令入口
+│     └─ verify.ts                 数据完整性自检
+├─ scripts/
+│  └─ dev.ps1                      启动 M0 的本地服务
+├─ data/                           （git 忽略）
+│  ├─ workhelper.db
+│  ├─ attachments/
+│  └─ backups/
+├─ tests/                          node:test
+├─ package.json
+├─ tsconfig.json                   仅供编辑器提示，不参与运行
+├─ .gitignore
+└─ README.md
+```
+
+---
+
+## 4. 数据模型
+
+### 4.1 实体关系
+
+```
+projects ──< tasks ──< subtasks
+    │           │          │
+    └───────────┴──────────┴──< progress_entries   (三选一挂载，CHECK 约束)
+    
+inbox_items ──(转任务)──> tasks          (保留 source_inbox_id 回溯)
+
+daily_logs      一天一条，按 day_key 唯一
+archive_items   会议纪要/链接/截图，可关联任意对象，也可游离
+attachments     文件元信息，被 archive_items 引用
+settings        键值配置（日界小时、AI 参数、UI 偏好）
+```
+
+### 4.2 通用约定
+
+- **主键**：`TEXT`，应用侧生成小写 UUID v4（`crypto.randomUUID()`）。不用自增整数，避免日后合并/导入时冲突。
+- **时间列**：`TEXT`，UTC ISO 8601（`2026-09-29T07:30:00.000Z`）。SQLite 无原生时间类型，字符串字典序即时间序，可直接比较与排序。
+- **日键列**：`TEXT`，本地日期 `YYYY-MM-DD`，由 `day/dayKey.ts` 按日界算出。**冗余存储**是为了让"按天聚合"能走索引，而不是每次全表扫时间戳。
+- **布尔**：`INTEGER` 0/1。
+- **删除**：`deleted_at TEXT NULL` 软删除；所有业务查询默认追加 `deleted_at IS NULL`。
+
+### 4.3 枚举取值（存在 `CHECK` 约束里，与 `domain/types.ts` 必须一致）
+
+| 字段 | 取值 |
+| --- | --- |
+| `projects.status` | `active` / `paused` / `done` / `archived` |
+| `projects.priority` | `high` / `normal` / `low` |
+| `tasks.status` | `todo` / `doing` / `blocked` / `done` / `cancelled` |
+| `tasks.priority` | `high` / `normal` / `low` |
+| `subtasks.status` | `todo` / `done` |
+| `progress_entries.kind` | `progress` / `blocker` / `decision` / `waiting` |
+| `inbox_items.status` | `pending` / `converted` / `archived` |
+| `archive_items.kind` | `note` / `meeting` / `link` / `file` |
+
+### 4.4 建表 DDL
+
+```sql
+-- 001_init.sql
+
+-- 项目：一件事 / 一个阶段 / 一条工作线
+CREATE TABLE projects (
+  id           TEXT PRIMARY KEY,
+  title        TEXT NOT NULL,
+  goal         TEXT,
+  status       TEXT NOT NULL DEFAULT 'active'
+                 CHECK (status IN ('active','paused','done','archived')),
+  priority     TEXT NOT NULL DEFAULT 'normal'
+                 CHECK (priority IN ('high','normal','low')),
+  start_date   TEXT,
+  due_date     TEXT,
+  sort_order   REAL NOT NULL DEFAULT 1,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL,
+  deleted_at   TEXT
+);
+CREATE INDEX idx_projects_status ON projects(status, sort_order) WHERE deleted_at IS NULL;
+
+-- 任务：可独立交付、有完成判据的工作单元
+CREATE TABLE tasks (
+  id               TEXT PRIMARY KEY,
+  project_id       TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  title            TEXT NOT NULL,
+  detail           TEXT,
+  status           TEXT NOT NULL DEFAULT 'todo'
+                     CHECK (status IN ('todo','doing','blocked','done','cancelled')),
+  priority         TEXT NOT NULL DEFAULT 'normal'
+                     CHECK (priority IN ('high','normal','low')),
+  due_at           TEXT,                       -- 含时间的截止（用于 P1 截止提醒）
+  due_date         TEXT,                       -- 纯日期截止（用于"今天到期"聚合）
+  estimate_minutes INTEGER,                    -- Q1：保留字段，不做计时
+  blocked_reason   TEXT,                       -- status='blocked' 时必填（由服务层校验）
+  planned_for      TEXT,                       -- 手工"加入今日"的日键
+  completed_at     TEXT,
+  sort_order       REAL NOT NULL DEFAULT 1,
+  source_inbox_id  TEXT REFERENCES inbox_items(id) ON DELETE SET NULL,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL,
+  deleted_at       TEXT
+);
+CREATE INDEX idx_tasks_project ON tasks(project_id, sort_order)  WHERE deleted_at IS NULL;
+CREATE INDEX idx_tasks_status  ON tasks(status, due_date)        WHERE deleted_at IS NULL;
+CREATE INDEX idx_tasks_today   ON tasks(planned_for)             WHERE deleted_at IS NULL;
+
+-- 子任务：任务下的可执行步骤
+CREATE TABLE subtasks (
+  id           TEXT PRIMARY KEY,
+  task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  title        TEXT NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','done')),
+  due_date     TEXT,
+  completed_at TEXT,
+  sort_order   REAL NOT NULL DEFAULT 1,
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL,
+  deleted_at   TEXT
+);
+CREATE INDEX idx_subtasks_task ON subtasks(task_id, sort_order) WHERE deleted_at IS NULL;
+
+-- 进展记录：可挂在项目 / 任务 / 子任务任意一层，恰好挂一个
+CREATE TABLE progress_entries (
+  id          TEXT PRIMARY KEY,
+  project_id  TEXT REFERENCES projects(id) ON DELETE CASCADE,
+  task_id     TEXT REFERENCES tasks(id)    ON DELETE CASCADE,
+  subtask_id  TEXT REFERENCES subtasks(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL DEFAULT 'progress'
+                CHECK (kind IN ('progress','blocker','decision','waiting')),
+  body        TEXT NOT NULL,
+  day_key     TEXT NOT NULL,
+  occurred_at TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  deleted_at  TEXT,
+  CHECK (
+    (project_id IS NOT NULL) + (task_id IS NOT NULL) + (subtask_id IS NOT NULL) = 1
+  )
+);
+CREATE INDEX idx_progress_task    ON progress_entries(task_id, occurred_at DESC)    WHERE deleted_at IS NULL;
+CREATE INDEX idx_progress_project ON progress_entries(project_id, occurred_at DESC) WHERE deleted_at IS NULL;
+CREATE INDEX idx_progress_day     ON progress_entries(day_key)                      WHERE deleted_at IS NULL;
+
+-- 收件箱：一切未分类输入的落点
+CREATE TABLE inbox_items (
+  id           TEXT PRIMARY KEY,
+  body         TEXT NOT NULL,
+  kind_hint    TEXT CHECK (kind_hint IN ('todo','note')),   -- 快记时的芯片选择，仅作提示
+  status       TEXT NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending','converted','archived')),
+  parsed_due   TEXT,                                        -- 自然语言解析出的日期（高置信度）
+  raw_input    TEXT,                                        -- 原始输入，解析前的原文
+  converted_to TEXT,                                        -- 转成什么（'task:uuid' / 'archive:uuid'）
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL,
+  deleted_at   TEXT
+);
+CREATE INDEX idx_inbox_pending ON inbox_items(created_at DESC) WHERE status='pending' AND deleted_at IS NULL;
+
+-- 每日日志：一天一条
+CREATE TABLE daily_logs (
+  id         TEXT PRIMARY KEY,
+  day_key    TEXT NOT NULL UNIQUE,
+  body       TEXT,                 -- 我手写的正文
+  mood       TEXT,                 -- 预留，未使用
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT
+);
+
+-- 资料条目：会议纪要、链接、截图、文件
+CREATE TABLE archive_items (
+  id          TEXT PRIMARY KEY,
+  kind        TEXT NOT NULL DEFAULT 'note'
+                CHECK (kind IN ('note','meeting','link','file')),
+  title       TEXT,
+  body        TEXT,
+  url         TEXT,
+  project_id  TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  task_id     TEXT REFERENCES tasks(id)    ON DELETE SET NULL,
+  day_key     TEXT,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  deleted_at  TEXT
+);
+CREATE INDEX idx_archive_day  ON archive_items(day_key)  WHERE deleted_at IS NULL;
+CREATE INDEX idx_archive_task ON archive_items(task_id)  WHERE deleted_at IS NULL;
+
+-- 附件元信息（文件本体放 data/attachments/）
+CREATE TABLE attachments (
+  id           TEXT PRIMARY KEY,
+  archive_id   TEXT REFERENCES archive_items(id) ON DELETE CASCADE,
+  file_name    TEXT NOT NULL,
+  rel_path     TEXT NOT NULL,        -- 相对 attachments/ 的路径
+  byte_size    INTEGER NOT NULL,
+  sha256       TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  deleted_at   TEXT
+);
+
+-- 键值配置
+CREATE TABLE settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,          -- JSON 编码
+  updated_at TEXT NOT NULL
+);
+
+-- 全文检索（F-11）
+-- 注意：CJK 文本必须先折叠成 bigram 再写入 tokens 列，原因见 §6.5（已实测）
+CREATE VIRTUAL TABLE search_fts USING fts5(
+  entity_type UNINDEXED,             -- 'task' | 'subtask' | 'progress' | 'inbox' | 'archive' | 'log'
+  entity_id   UNINDEXED,
+  title,                             -- 原文，供展示
+  body,                              -- 原文，供展示
+  tokens,                            -- 折叠索引列：中文 bigram + 英文小写词
+  tokenize = 'unicode61 remove_diacritics 2'
+);
+```
+
+### 4.5 几个设计取舍的理由
+
+| 取舍 | 原因 |
+| --- | --- |
+| **收件箱独立建表**，不复用 `tasks` | 任务必须有项目归属，而捕获时不允许要求分类；混用会让 `project_id` 变成可空噪声，并让"今日视图"被未分类条目污染 |
+| **进展记录用三列可空外键 + CHECK**，而不是多态 `(target_type, target_id)` | 保留真实外键约束与 `ON DELETE CASCADE`，SQLite 才能在删除父对象时自动清理；多态方案失去引用完整性 |
+| **`due_at` 与 `due_date` 分开** | "今天到期"聚合要按本地日键匹配，若只有一个带时区的时间戳，跨时区与跨日界时会算错；两者由服务层保持一致 |
+| **`sort_order` 用 REAL** | 拖拽排序时插入到两项之间只需取中间值（`(a+b)/2`），不必重排整列；这是 M0 拖拽体验的关键 |
+| **软删除用 `deleted_at`**，不做 `is_deleted` | 一个字段同时承载"是否删除"与"何时删除"，回收站可按 30 天到期清理 |
+| **日键冗余存储** | 按天聚合（每日日志、周报）是最频繁查询；实时计算 4 点切日无法用索引 |
+| **没有变更日志表** | 单机单用户无同步需求；事实源就是关系表，备份即完整快照 |
+
+---
+
+## 5. 日界算法（4 点切日）
+
+需求 F-15：默认凌晨 4 点切日——凌晨 1 点的记录算前一天。
+
+```ts
+// core/day/dayKey.ts
+export function dayKeyOf(instant: Date, boundaryHour: number, tzOffsetMinutes?: number): string
+```
+
+算法（**纯本地时间运算，不引入时区库**）：
+
+1. 取该时刻的本地时间分量（年、月、日、时、分）。
+2. 若 `hour < boundaryHour`，本地日期减一天。
+3. 格式化为 `YYYY-MM-DD`。
+
+判定用例（边界必须写成测试）：
+
+| 本地时间 | 日界小时 | 期望日键 |
+| --- | --- | --- |
+| 2026-09-29 23:59 | 4 | `2026-09-29` |
+| 2026-09-30 00:00 | 4 | `2026-09-29` |
+| 2026-09-30 03:59 | 4 | `2026-09-29` |
+| 2026-09-30 04:00 | 4 | `2026-09-30` |
+| 2026-09-30 12:00 | 4 | `2026-09-30` |
+| 2026-09-30 00:00 | 0 | `2026-09-30`（0 点时退化为自然日） |
+| 2026-01-01 02:00 | 4 | `2025-12-31`（跨年） |
+| 2026-03-01 02:00 | 4 | `2026-02-28`（跨月，非闰年） |
+
+**注意**：`occurred_at` 仍存真实 UTC 时间戳，日键只是它的一个派生投影。任何"补录到昨天"的操作都必须同时写 `occurred_at`（真实时刻）与 `day_key`（归属日），两者不要求一致——这是补录能成立的前提。
+
+---
+
+## 6. 内核服务接口（界面层唯一入口）
+
+```ts
+// core/service/index.ts —— 门面，M1 换成 IPC 时此签名不变
+
+export interface WorkHelperServices {
+  capture:  CaptureService;
+  planning: PlanningService;
+  tracking: TrackingService;
+  journal:  JournalService;
+  search:   SearchService;
+  system:   SystemService;
+}
+```
+
+### 6.1 CaptureService — 捕获（F-01 ~ F-05）
+
+```ts
+interface CaptureService {
+  /** 快记：唯一一条不能失败的通路。整条路径同步、单事务、无网络。 */
+  quickCapture(input: { text: string; kindHint?: 'todo' | 'note' }): {
+    item: InboxItem;
+    parsed: ParsedDate | null;   // 高置信度日期解析结果，仅用于界面提示
+  };
+
+  listPending(options?: { limit?: number }): InboxItem[];
+
+  /** 单条分类。target 决定落到哪张表 */
+  classify(id: string, target:
+    | { kind: 'task'; projectId?: string | null; dueDate?: string | null }
+    | { kind: 'archive'; archiveKind?: ArchiveKind }
+    | { kind: 'discard' }
+  ): { kind: string; id: string };
+
+  /** 批量分类（收件箱一次清空多条） */
+  classifyMany(ids: string[], target: ClassifyTarget): ClassifyResult[];
+
+  /** 撤销上一次分类（AI 写入后的一键撤销也走这里） */
+  undoLastClassification(): boolean;
+}
+```
+
+**"不存在保存失败"的实现方式**（需求 §6.3）：`quickCapture` 内部只有一个事务、一条 INSERT，无网络、无文件 IO（除 SQLite 自身）。任何解析失败都降级为"原样存标题"，不抛错。
+
+### 6.2 PlanningService — 结构（F-06 ~ F-08）
+
+```ts
+interface PlanningService {
+  createProject(input: { title: string; goal?: string; dueDate?: string | null }): Project;
+  updateProject(id: string, patch: ProjectPatch): Project;
+
+  createTask(input: { title: string; projectId?: string | null; priority?: Priority;
+                      dueDate?: string | null; estimateMinutes?: number | null }): Task;
+  updateTask(id: string, patch: TaskPatch): Task;
+  setTaskStatus(id: string, status: TaskStatus, opts?: { blockedReason?: string }): Task;
+  completeTask(id: string, opts?: { cascadeSubtasks?: boolean }): Task;
+
+  createSubtask(input: { taskId: string; title: string }): Subtask;
+  updateSubtask(id: string, patch: SubtaskPatch): Subtask;
+
+  /** 拖拽排序：把 movedId 插到 beforeId 之前（null = 末尾） */
+  reorder(kind: 'project' | 'task' | 'subtask', movedId: string,
+          beforeId: string | null, newParentId?: string | null): void;
+
+  projectTree(projectId: string): ProjectTree;   // 项目 + 任务 + 子任务 + 各自进展计数
+}
+```
+
+### 6.3 TrackingService — 推进与今日（F-09、F-08）
+
+```ts
+interface TrackingService {
+  /** 追加进展记录；target 三选一 */
+  addProgress(input: {
+    target: { kind: 'project' | 'task' | 'subtask'; id: string };
+    kind: ProgressKind;
+    body: string;
+    /** 补录用：不传则取当前时刻与该时刻的日键 */
+    occurredAt?: string;
+  }): ProgressEntry;
+
+  /** 任务下的进展时间线 */
+  timeline(target: { kind: string; id: string }, options?: { limit?: number }): ProgressEntry[];
+
+  /** 今日视图（F-08）：逾期置顶 + 今日到期 + 手工加入今日 */
+  todayView(dayKey?: string): {
+    overdue: Task[];
+    dueToday: Task[];
+    planned: Task[];
+    blocked: Task[];
+    inboxCount: number;
+  };
+}
+```
+
+**状态联动规则**（写进 `domain/rules.ts` 并单测）：
+- 追加 `kind='blocker'` 的进展 → 任务状态自动转 `blocked`，并把 `body` 写入 `blocked_reason`。
+- 任务转 `blocked` 而 `blocked_reason` 为空 → 抛 `InvalidTransition`（服务层校验，不靠 UI）。
+- 所有子任务 `done` → 提示（不自动）完成任务；`cascadeSubtasks: true` 时才级联标记。
+- 任务转 `done` 时写 `completed_at`；从 `done` 改回其它状态时清空 `completed_at`。
+
+### 6.4 JournalService — 日志（F-15 ~ F-17）
+
+```ts
+interface JournalService {
+  /** 自动汇总（不写库，纯查询投影） */
+  summarize(dayKey: string): {
+    dayKey: string;
+    completedTasks: Task[];
+    completedSubtasks: Subtask[];
+    createdInbox: InboxItem[];
+    createdTasks: Task[];
+    carriedOver: Task[];               // 该日未完成、且日界早于今天
+    openBlockers: ProgressEntry[];
+    timeline: ProgressEntry[];         // 当日全部进展记录，按时间
+  };
+
+  get(dayKey: string): DailyLog | null;
+  /** 保存手工正文（自动汇总部分不落库，避免数据重复与过期） */
+  save(dayKey: string, body: string): DailyLog;
+}
+```
+
+**关键决策**：自动汇总是**运行时投影**，不写进 `daily_logs.body`。否则任务状态一变，历史日志就变成错的。日志只保存我手写的正文。
+
+### 6.5 SearchService — 搜索（F-11）★ 已实测定型
+
+```ts
+interface SearchService {
+  search(query: string, options?: { types?: EntityType[]; limit?: number }): SearchHit[];
+  /** FTS 索引维护：由 repo 写入后同步调用，失败只记日志不阻断业务 */
+  reindex(entityType: EntityType, entityId: string): void;
+  reindexAll(): number;
+}
+```
+
+#### 中文检索：实测结论与最终方案
+
+M0 设计初期，FTS5 用 `unicode61` 分词器直接索引中文**实测完全不可用**：
+
+| 查询 | `unicode61` 直接索引 | 原因 |
+| --- | --- | --- |
+| `"接口文档"`（整串） | ❌ 无结果 | `unicode61` 把连续 CJK 串当成**一个** token，而查询被解析成短语匹配 |
+| `"文档"`（子串） | ❌ 无结果 | 子串不是独立 token |
+| `data` / `DATA` | ✅ 命中 | 英文分词正常，且大小写不敏感 |
+
+**最终方案：bigram 折叠索引**。写入 `tokens` 列前，把文本折叠成 `unicode61` 能正确切分的形态：
+
+```ts
+// core/repo/search.ts
+export function toTokens(text: string): string {
+  const out: string[] = [];
+  for (const m of text.matchAll(/[A-Za-z0-9_]+/g)) out.push(m[0].toLowerCase());  // 英文/数字
+  for (const run of text.match(/[\u4e00-\u9fff\u3400-\u4dbf]+/g) ?? []) {          // 连续 CJK 段
+    if (run.length === 1) { out.push(run); continue; }
+    for (let i = 0; i < run.length - 1; i++) out.push(run.slice(i, i + 2));        // 相邻双字
+  }
+  return out.join(' ');
+}
+// 例：'整理Q3数据平台迁移方案' → 'q3 整理 数据 据平 平台 台迁 迁移 移方 方案'
+```
+
+查询侧同样折叠，再用**列限定短语匹配**：`WHERE search_fts MATCH 'tokens : "<折叠后的查询>"'`。
+
+**实测数据（1005 条记录，本机 SQLite 3.53.4）**：
+
+| 指标 | 结果 |
+| --- | --- |
+| 与 `LIKE '%…%'` 兜底的**结果一致性** | **11 / 11 用例完全一致**（含中文整串、子串、中间片段、跨词子串、中英混合、英文大小写、多词） |
+| FTS5+bigram 查询耗时 | **3.57 ms**（走倒排索引，随数据量**亚线性**增长） |
+| `LIKE '%…%'` 兜底耗时 | 2.25 ms —— 但**这是全表扫描**，1000 条即可见劣化趋势，1 万条约 20ms+，10 万条将突破 200ms 指标 |
+| 误报 | 未发现；"看不见的问题" 仅被查询"看不见"命中 |
+
+**决策：采用 FTS5 + bigram 作为唯一检索通路，`LIKE` 仅降级用于查询长度 < 2 个字符的场景**（bigram 无法覆盖单字查询，此时退化为 `LIKE`，因单字查询结果集小，全表扫描代价可接受）。
+
+> 原设计文档把此项列为"未决项 D1"，现**已实测关闭**。
+
+### 6.6 SystemService — 系统
+
+```ts
+interface SystemService {
+  settings: { get<T>(key: string, fallback: T): T; set(key: string, value: unknown): void };
+  dayBoundaryHour(): number;            // 默认 4，可配置（F-15）
+  createBackup(reason: string): string; // 返回快照路径
+  integrityCheck(): { ok: boolean; issues: string[] };  // PRAGMA integrity_check + 业务自检
+  trash: { list(): TrashEntry[]; restore(id: string): void; purge(): number };
+}
+```
+
+---
+
+## 7. M0 界面契约（极简，用于验证闭环）
+
+M0 不做 Tauri，用一个本地 HTTP 服务 + 静态页面跑通闭环（M1 替换为真正的桌面壳，**内核代码一行不改**）。
+
+### 7.1 本地服务
+
+- 只监听 `127.0.0.1`，端口默认 `7317`（可配置），避免任何外部可达面。
+- 路由：`GET /` → 主界面；`GET /capture` → 快记窗；`POST /api/<service>/<method>` → 门面转发。
+- **不引入 Web 框架**：用 `node:http` 手写 30 行路由。
+
+### 7.2 快记窗（F-01 / F-02 的 M0 形态）
+
+| 元素 | 行为 |
+| --- | --- |
+| 输入框 | 打开即聚焦；`Enter` 保存并关闭；`Shift+Enter` 换行；`Esc` 取消 |
+| 三个芯片 | `收件箱`（默认选中）/ `进展` / `资料`——**键盘 Tab + Enter 可完成选择**，不强制鼠标 |
+| 解析提示 | 若识别到高置信度日期，在输入框下方显示浅色标签 `截止 2026-10-07`；识别不到则不显示任何元素 |
+| 保存反馈 | 窗口收起动画 300ms；不弹确认框、不抢焦点 |
+| 失败处理 | 不做错误弹窗——写入失败时窗口**不关闭**并在输入框下方显示一行红字 |
+
+M0 用浏览器窗口模拟；M1 用 Tauri 的无边框置顶窗 + 全局快捷键替换。
+
+### 7.3 主界面（M0 最小集）
+
+四个页签，只做能验证需求的东西：
+
+| 页签 | 内容 | 验证的需求 |
+| --- | --- | --- |
+| **收件箱** | 待处理列表 + 多选 + `转任务 / 归档 / 丢弃`；顶部显示待处理数量 | F-04、需求 §6.5 |
+| **今日** | 逾期（红）/ 今日到期 / 手工加入今日 / 阻塞项 四组；每条可 `Ctrl+Enter` 追加进展 | F-08、F-09 |
+| **项目** | 项目 → 任务 → 子任务树；行内展开进展时间线；支持拖拽排序 | F-06、F-07 |
+| **日志** | 日期选择器 + 自动汇总区（只读）+ 手工正文编辑区 | F-16、F-17 |
+
+M0 **刻意不做**：悬浮组件、托盘、全局快捷键、提醒、AI、导出、附件上传。这些属 M1/M2。
+
+---
+
+## 8. 关键流程时序
+
+### 8.1 快记（目标 ≤ 500ms 端到端）
+
+```
+热键/打开窗 → 输入文本 → Enter
+   ↓
+core.service.capture.quickCapture(text)
+   ├─ day.parseDate(text)        纯本地正则/规则，无网络 → 返回 {date} | null
+   ├─ withTx:
+   │    ├─ INSERT inbox_items
+   │    └─ search.reindex('inbox', id)     （失败只记日志）
+   └─ 返回 item + parsed
+   ↓
+窗口关闭 + 动画
+```
+
+时间预算：SQLite 单条 WAL 提交 ≈ 1–5ms；日期解析为纯字符串规则 ≈ <1ms；**总预算远低于 500ms，瓶颈只会在界面层**。
+
+### 8.2 收件箱清空（F-04）
+
+```
+多选 ids → 选择目标
+   ├─ 转任务：为每题：INSERT tasks（source_inbox_id 回溯）→ UPDATE inbox_items.status='converted'
+   ├─ 归档：  INSERT archive_items → 同上
+   └─ 丢弃：  UPDATE inbox_items.status='archived'
+   全部在一个事务内；记录 last_classification 供 undoLastClassification() 撤销
+```
+
+### 8.3 AI 拆分（M2，先定契约防返工）
+
+```
+选中收件箱条目/任务 → 「帮我拆」
+   ↓
+ai.splitProposal(input)  →  SplitProposal {
+      parentTitle, subtasks: [{ title, acceptance?, estimateMinutes?, order }],
+      model, raw
+   }                        ← 只产出对象，绝不写库
+   ↓
+界面渲染可编辑预览（增/删/改/合并/重排）
+   ↓
+用户点确认 → planning.createSubtask(...) × N   ← 写入只发生在这一步
+   ↓
+记录 proposal 与结果，供整体撤销
+```
+
+**硬性约束**：`core/ai/**` 不得 import `core/repo/**`。此约束由 §2.2 第 1 条的可检查规则兜底。
+
+---
+
+## 9. 备份与数据安全（F-13 / Q6）
+
+| 机制 | 实现 |
+| --- | --- |
+| 启动快照 | 每次进程启动，用 SQLite 在线备份 API 或 `VACUUM INTO` 生成 `data/backups/wh-YYYYMMDD-HHmmss.db` |
+| 轮换策略 | 保留最近 **7 个日快照 + 4 个周快照**，超出自动删除 |
+| 软删除 | `deleted_at` 标记；回收站保留 **30 天**；`purge()` 清理到期项 |
+| 完整性自检 | `PRAGMA integrity_check` + 业务自检（孤儿记录、状态不一致、`blocked` 无原因） |
+| 导出兜底 | M2 的 Markdown 导出兼作"人可读备份" |
+
+---
+
+## 10. 测试策略
+
+用 Node 内置 `node:test`，**零测试框架依赖**。
+
+| 层级 | 必测内容 |
+| --- | --- |
+| 日界 `dayKey.test.ts` | §5 表格中的全部 8 个边界用例 + 跨年跨月 |
+| 日期解析 `parseDate.test.ts` | "下周三 / 明天 / 10月8日 / 下个月3号"；**必须包含反例**："看不见的问题"不得被解析成日期 |
+| 状态机 `rules.test.ts` | 非法流转被拒；`blocked` 无原因是错误；`done` ↔ 其它状态时 `completed_at` 的正确性 |
+| 迁移 `migrations.test.ts` | 空库跑到最新版；重复执行幂等；`user_version` 正确 |
+| 服务 `capture.test.ts` | 快记 + 分类 + 撤销；中文文本往返无损 |
+| 搜索 `search.test.ts` | 中文子串、英文大小写、1000 条数据下的响应时间 |
+| 完整性 `integrity.test.ts` | 软删除后查询不可见；级联删除正确；回收站恢复 |
+
+---
+
+## 11. M0 任务清单（按提交顺序）
+
+| # | 任务 | 产出 | 完成判据 |
+| --- | --- | --- | --- |
+| T1 | 工程骨架 | `package.json`（零依赖）、`tsconfig.json`（仅编辑器提示）、目录树 | `node src/cli/wh.ts --version` 有输出 |
+| T2 | 数据层 | `db/connection.ts`、`migrations.ts`、`001_init.sql` | 空库一键建表；`user_version=1`；重复运行幂等 |
+| T3 | 日界与日期解析 | `day/dayKey.ts`、`day/parseDate.ts` | §10 两个测试文件全绿 |
+| T4 | 领域规则 | `domain/types.ts`、`errors.ts`、`rules.ts` | 状态机测试全绿 |
+| T5 | 仓储层 | `repo/*`（9 个模块） | 每个 repo 有覆盖 CRUD + 软删除的单测 |
+| T6 | 服务层 | `capture`、`planning`、`tracking`、`journal`、`search`、`system` | 服务级单测全绿（含收件箱清空与撤销） |
+| T7 | CLI 验证器 | `cli/wh.ts`、`cli/verify.ts` | 能在无界面情况下登记、分类、写日志并自检通过 |
+| T8 | 本地服务与界面 | `ui/server.ts` + 四个页签 | **连续 3 天真实使用**（M0 验收，见需求 §8） |
+| T9 | 备份与回收站 | `service/backup.ts`、`repo/trash.ts` | 快照生成、轮换、恢复、30 天清理测试通过 |
+
+**M0 完成判据（不可妥协）**：我能连续 3 天用它登记与推进工作，且过程中没有丢过任何一条记录。
+
+---
+
+## 12. 设计阶段的未决项
+
+| # | 项 | 状态 |
+| --- | --- | --- |
+| ~~D1~~ | ~~中文搜索是否需要引入 bigram 索引或分词表~~ | ✅ **已实测定型**：采用 FTS5 + bigram，见 §6.5 |
+| D2 | 拖拽排序的 UI 实现（HTML5 DnD vs 指针事件） | M0 T8 开始时决 |
+| D3 | Tauri 侧 IPC 形态（命令 vs 通道）与内核是否独立进程 | M1 设计时决 |
+| D4 | 附件的去重与存储布局（按 sha256 分片？） | M0 T5 实现 `attachments` 时决 |
+| D5 | `due_at` 与 `due_date` 的一致性维护点（是否引入触发器） | M0 T5 前定；倾向服务层维护，不用触发器 |
+
+---
+
+## 13. 设计验证记录（已实测，非推测）
+
+设计中的高风险假设在动工前已全部实测，避免基于"想当然"编码：
+
+| 验证项 | 方法 | 结果 |
+| --- | --- | --- |
+| Node 原生运行 TypeScript | 用带类型注解 + ESM + `node:sqlite` 的脚本直接 `node run` | ✅ 通过，**无需构建步骤** |
+| `node:sqlite` 可用性 | 建表、中文读写、版本查询 | ✅ 可用，SQLite **3.53.4**，中文无损 |
+| `journal_mode=WAL` | `PRAGMA` 读取回值 | ✅ 返回 `wal` |
+| `foreign_keys=ON` | `PRAGMA` 读取回值 | ✅ 生效 |
+| **§4.4 全部 DDL** | 原样执行建表 + 索引 + FTS5 虚拟表 | ✅ 全部成功，无语法错误 |
+| `progress_entries` 的 `CHECK` 约束 | 尝试插入"三列全空"与"挂两个父对象" | ✅ 两种情况均被拒绝 |
+| `ON DELETE CASCADE` 级联 | 删任务后统计孤儿进展记录 | ✅ 剩余 0 条 |
+| 部分索引是否被使用 | `EXPLAIN QUERY PLAN` | ✅ `SCAN inbox_items USING INDEX idx_inbox_pending` |
+| 中文全文检索 | 11 个用例对比 FTS5+bigram vs LIKE | ✅ 11/11 一致，3.57ms（详见 §6.5） |
+| 快记通路时间预算 | 单条 WAL 提交 + 纯本地日期解析 | 预算远低于 500ms 指标，瓶颈只在界面层 |
+
+**验证脚本位置**：`D:\temp\wh-probe\`（临时目录，不属于工程；T3/T5 会把其中的关键断言固化为 `tests/` 下的正式测试）。
+
+安全提醒（工程纪律，非推测）：在本机对「工作秘书」自身跑 `PRAGMA integrity_check` / `foreign_key_check` / `quick_check` 属正常运维；但**切勿对本机其他 SQLite 库执行写操作或修复类 PRAGMA**（例如其他软件的数据文件），那可能造成不可逆的数据损坏。本项目只操作 `data/workhelper.db`。

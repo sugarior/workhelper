@@ -1,0 +1,34 @@
+# 数据与运行时产出（绝不提交：这是你的私人工作数据）
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# 本地配置与密钥（DeepSeek API Key 等）
+.env
+.env.*
+config.local.json
+secrets/
+
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+out/
+src-tauri/target/
+*.log
+
+# 备份与快照
+backups/
+*.bak
+
+# 编辑器 / 系统
+.vscode/*
+!.vscode/extensions.json
+.idea/
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# 临时探测文件
+.probe.md
