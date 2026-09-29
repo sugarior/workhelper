@@ -5,7 +5,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import { queryOne, SCHEMA_VERSION } from './connection.ts';
+import { pragmaValue, SCHEMA_VERSION } from './connection.ts';
 import { withTx } from './tx.ts';
 import { MigrationError } from '../domain/errors.ts';
 
@@ -25,8 +25,7 @@ export interface MigrationResult {
 }
 
 function readVersion(database: DatabaseSync): number {
-  const row = queryOne<{ user_version: number }>(database, 'PRAGMA user_version');
-  return row?.user_version ?? 0;
+  return pragmaValue<{ user_version: number }>(database, 'user_version')?.user_version ?? 0;
 }
 
 /** 列出可用迁移，按版本升序。文件名不合规直接报错，避免静默漏跑。 */

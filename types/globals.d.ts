@@ -45,6 +45,15 @@ declare module 'node:sqlite' {
   ): Promise<number>;
 }
 
+declare module 'node:sqlite' {
+  /** node:sqlite 抛出的错误：errcode 1 = SQL 逻辑错误（含约束冲突） */
+  export interface SqliteError extends Error {
+    code?: string;
+    errcode?: number;
+    errstr?: string;
+  }
+}
+
 declare module 'node:fs' {
   export function readdirSync(
     path: string,

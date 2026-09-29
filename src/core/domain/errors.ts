@@ -46,6 +46,13 @@ export class MigrationError extends DomainError {
   }
 }
 
+/** 违反结构约束（唯一键、CHECK、外键），由仓储层把 SQLite 错误翻译而来 */
+export class ConstraintError extends DomainError {
+  constructor(message: string) {
+    super('CONSTRAINT', message);
+  }
+}
+
 /** 判断任意异常是否属于本项目的领域错误 */
 export function isDomainError(error: unknown): error is DomainError {
   return error instanceof DomainError;

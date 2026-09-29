@@ -191,12 +191,38 @@ test('删除项目只解除任务归属，不删除任务', () => {
   }
 });
 
-test('每天只能有一条日志', () => {
+test('每天只能有一条未删除的日志（部分唯一索引）', () => {
   const database = freshDb();
   try {
+    const now = '2026-09-30T02:00:00.000Z';
     const insert = database.prepare('INSERT INTO daily_logs (id, day_key, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?)');
-    insert.run('log-1', '2026-09-30', '今天', NOW, NOW);
-    assert.throws(() => insert.run('log-2', '2026-09-30', '重复', NOW, NOW), /UNIQUE constraint failed/i);
+    insert.run('log-1', '2026-09-30', '今天', now, now);
+    assert.throws(() => insert.run('log-2', '2026-09-30', '重复', now, now), /UNIQUE constraint failed/i);
+  } finally {
+    closeDatabase(database);
+  }
+});
+
+test('软删除的日志不再占用当天：删除后可以重新创建', () => {
+  const database = freshDb();
+  try {
+    const now = '2026-09-30T02:00:00.000Z';
+    database
+      .prepare('INSERT INTO daily_logs (id, day_key, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .run('log-1', '2026-09-30', '初稿', now, now);
+    database.prepare('UPDATE daily_logs SET deleted_at = ? WHERE id = ?').run(now, 'log-1');
+
+    // 关键：day_key 的唯一性只约束"未删除"的行，否则删掉当天日志后就再也写不回来
+    database
+      .prepare('INSERT INTO daily_logs (id, day_key, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .run('log-2', '2026-09-30', '重新写', now, now);
+
+    const live = database
+      .prepare('SELECT COUNT(*) AS c FROM daily_logs WHERE deleted_at IS NULL')
+      .get() as { c: number };
+    assert.equal(Number(live.c), 1);
+    const all = database.prepare('SELECT COUNT(*) AS c FROM daily_logs').get() as { c: number };
+    assert.equal(Number(all.c), 2, '旧行仍在（软删除），只是不再占用当天');
   } finally {
     closeDatabase(database);
   }

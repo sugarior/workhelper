@@ -6,19 +6,55 @@
 
 ## 当前状态
 
-**M0 进行中**：T1–T4 已完成（工程骨架、数据层、日界与日期解析、领域规则），55 项测试全部通过。
-尚无界面，可通过 CLI 验证数据库与迁移。
+**M0 已可用（T1–T7、T9 完成）**：内核、服务层、命令行全部就绪，212 项测试通过。
+界面（T8）待做，但**现在就可以开始真实使用**并计时"连续 3 天"的 M0 验收。
 
-```
-node src/cli/wh.ts --version    # 版本
-node src/cli/wh.ts migrate      # 建库 / 升级结构（幂等）
-node src/cli/wh.ts status       # 数据库与迁移状态
-node src/cli/wh.ts verify       # 完整性自检
-node --test tests/              # 运行全部测试
+**零依赖、零构建**：`dependencies` 为空，不需要 `npm install`，也不需要编译
+（Node 26 原生运行 TypeScript，内置 `node:sqlite`，`node_modules` 不存在）。
+
+## 快速上手
+
+数据默认存在 `data/`。第一次运行会自动建库。
+
+```bash
+# 随手记一句（自动识别「下周三」「明天」等日期）
+node src/cli/wh.ts add "接口文档 下周三 给张三"
+
+# 看收件箱、转成任务
+node src/cli/wh.ts inbox
+node src/cli/wh.ts task <id> --priority high
+node src/cli/wh.ts undo              # 分错了可以撤销
+
+# 今天做什么
+node src/cli/wh.ts today
+
+# 推进：开始 / 记一笔 / 卡住 / 解除 / 完成
+node src/cli/wh.ts doing <id>
+node src/cli/wh.ts note <id> "已完成初稿"
+node src/cli/wh.ts note <id> 卡点 "等法务确认"    # 状态会自动联动为 blocked
+node src/cli/wh.ts unblock <id>
+node src/cli/wh.ts done <id> --cascade
+
+# 项目与子任务
+node src/cli/wh.ts proj add "Q3 数据平台迁移" --goal "完成迁移"
+node src/cli/wh.ts sub <任务id> "盘点现有表"
+node src/cli/wh.ts proj show <项目id>
+
+# 日志与检索
+node src/cli/wh.ts log                        # 今日自动汇总
+node src/cli/wh.ts log 2026-09-20 "补录的正文"
+node src/cli/wh.ts search 文档                # 中文子串可搜
+
+# 系统
+node src/cli/wh.ts backup                     # 备份 + 轮换
+node src/cli/wh.ts trash list                 # 回收站
+node src/cli/wh.ts verify                     # 结构与业务自检
+node src/cli/wh.ts status
+node --test tests/                            # 全部测试
 ```
 
-**零依赖、零构建**：`dependencies` 为空，不需要 `npm install`，也不需要编译步骤
-（Node 26 原生运行 TypeScript，内置 `node:sqlite`）。
+ID 支持短前缀（像 git 一样，最少 4 位，歧义时会列出候选）。
+所有命令都支持 `--json`，便于脚本处理。
 
 ## 文档
 
