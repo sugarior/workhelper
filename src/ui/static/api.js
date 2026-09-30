@@ -56,7 +56,8 @@ export const api = {
   listProjects: (options = {}) => call('planning', 'listProjects', options),
   projectTree: (projectId) => call('planning', 'projectTree', projectId),
   createProject: (options) => call('planning', 'createProject', options),
-  deleteProject: (id) => call('planning', 'deleteProject', id),
+  /** 更新项目。项目的终止方式是 `{status:'archived'}`，与任务的「中止」对称 */
+  updateProject: (id, patch) => call('planning', 'updateProject', [id, patch]),
   listTasks: (filter = {}) => call('planning', 'listTasks', filter),
   createTask: (options) => call('planning', 'createTask', options),
   completeTask: (id) => call('planning', 'completeTask', [id, {}]),

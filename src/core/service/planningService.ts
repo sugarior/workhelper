@@ -46,7 +46,13 @@ export interface PlanningService {
   updateProject(id: string, patch: Parameters<typeof updateProject>[2]): Project;
   /** 删除项目：其下任务保留但解除归属（不静默隐藏任务） */
   deleteProject(id: string): { detachedTasks: number };
-  listProjects(options?: { status?: ProjectStatus }): Project[];
+  /**
+   * 列出项目。
+   *
+   * **默认只列活动项目** —— 已归档的项目（`status='archived'`，表示"不做了"）
+   * 不在默认结果里。要看它们请传 `includeArchived: true`。
+   */
+  listProjects(options?: { status?: ProjectStatus; includeArchived?: boolean }): Project[];
   /** 任务列表：按状态与项目过滤，未结束的排在前面 */
   listTasks(filter?: { status?: TaskStatus; projectId?: string | null }): Task[];
   projectTree(projectId: string): ProjectTree;
@@ -140,7 +146,17 @@ export function createPlanningService(database: DatabaseSync): PlanningService {
     },
 
     listProjects(options = {}) {
-      return listProjects(database, options);
+      /**
+       * **默认只列活动项目**（除非显式给了 status 或 includeArchived）。
+       *
+       * 这是领域默认值，不是展示偏好：项目有了"归档"这个终止状态之后
+       * （与任务的「中止」对称），"列出项目"的默认含义就应该是"还在做的那些"。
+       *
+       * 放在服务层而不是各调用方：目标选择器、资料页、项目页都调这一个方法，
+       * 靠每个调用方自觉过滤必然会漏一处（本项目已栽过多次）。
+       */
+      if (options.includeArchived === true) return listProjects(database, {});
+      return listProjects(database, { status: options.status ?? 'active' });
     },
 
     listTasks(filter = {}) {

@@ -7,6 +7,9 @@ import assert from 'node:assert/strict';
 import { useDb } from './helpers/db.ts';
 import { createCaptureService, canUndoClassification } from '../src/core/service/captureService.ts';
 import { createPlanningService } from '../src/core/service/planningService.ts';
+import { createTrackingService } from '../src/core/service/trackingService.ts';
+import { createMaterialService } from '../src/core/service/materialService.ts';
+import { listOrphanArchives } from '../src/core/repo/materialRepo.ts';
 import { createSearchService } from '../src/core/service/searchService.ts';
 import { createTask, getTask, listTasks } from '../src/core/repo/taskRepo.ts';
 import { listProjects } from '../src/core/repo/projectRepo.ts';
@@ -120,6 +123,54 @@ test('分类为资料：不选目标必须被拒绝（规则 M2 的落点）', (
     );
     assert.equal(getInboxItem(database, item.id)?.status, 'pending', '被拒绝后条目必须还在');
     assert.equal(listArchives(database).length, 0, '不应留下半成品');
+  });
+});
+
+test('项目列表：归档的项目默认不出现，但能显式找回（与任务的「中止」对称）', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const aktif = planning.createProject({ title: '在做的' });
+    const archived = planning.createProject({ title: '不做了的' });
+    planning.updateProject(archived.id, { status: 'archived' });
+
+    const byDefault = planning.listProjects();
+    assert.deepEqual(byDefault.map((p) => p.title), ['在做的'], '默认只列活动项目');
+    assert.ok(!byDefault.some((p) => p.id === archived.id));
+
+    // 「显示已归档」开关走这条路
+    const withArchived = planning.listProjects({ includeArchived: true });
+    assert.equal(withArchived.length, 2, 'includeArchived 要能找回它们，否则归档等于一去不返');
+
+    // 显式按状态过滤仍然有效
+    assert.deepEqual(planning.listProjects({ status: 'archived' }).map((p) => p.id), [archived.id]);
+    assert.deepEqual(planning.listProjects({ status: 'active' }).map((p) => p.id), [aktif.id]);
+  });
+});
+
+test('项目归档：不删除任何东西 —— 任务、进展、挂靠的资料都保留', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const materials = createMaterialService(database);
+
+    const project = planning.createProject({ title: '会被归档的项目' });
+    const task = planning.createTask({ title: '项目下的任务', projectId: project.id });
+    tracking.addProgress({ target: { kind: 'project', id: project.id }, kind: 'progress', body: '做了一些' });
+    const material = materials.create({
+      entries: [{ kind: 'dir', target: 'D:\\work\\proj' }],
+      targets: [{ type: 'project', id: project.id }],
+    });
+
+    planning.updateProject(project.id, { status: 'archived' });
+
+    // 归档不是删除：这些都是"历史价值"，正是文档要求保留的东西
+    assert.equal(listTasks(database).length, 1, '任务必须保留');
+    assert.equal(getTask(database, task.id)?.projectId, project.id, '归属不能被解除');
+    assert.equal(tracking.taskTimeline(task.id).length, 0);
+    assert.equal(database.prepare('SELECT COUNT(*) AS c FROM progress_entries WHERE project_id = ?').get(project.id).c, 1, '项目进展必须保留');
+    // 挂靠仍然有效：归档不是删除，资料不会变成孤儿
+    assert.deepEqual(materials.listForTarget('project', project.id).map((m) => m.id), [material.id]);
+    assert.deepEqual(listOrphanArchives(database), [], '归档项目不该让它的资料变成孤儿');
   });
 });
 

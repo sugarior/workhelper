@@ -59,7 +59,15 @@ export interface ServerOptions {
 const ALLOWED: Readonly<Record<string, readonly string[]>> = {
   capture: ['quickCapture', 'listPending', 'countPending', 'classify', 'classifyMany',
     'undoLastClassification', 'ignoreItem'],
-  planning: ['listProjects', 'projectTree', 'createProject', 'deleteProject',
+  /**
+   * `deleteProject` **刻意不放行**（与 `deleteTask` / `deleteSubtask` 一致）。
+   *
+   * 项目的终止方式是「归档」（`updateProject({status:'archived'})`），
+   * 与任务的「中止」对称：保留历史、进展与挂靠的资料。
+   * 放行删除会让「不做了」变成两条近义路径，也会在回收站里制造
+   * 「历史已删除」条目 —— 而那个栏目本该是死的（§4.3）。
+   */
+  planning: ['listProjects', 'projectTree', 'createProject', 'updateProject',
     'listTasks', 'createTask', 'completeTask', 'reopenTask', 'updateTask',
     'createSubtask', 'setSubtaskStatus', 'reorder'],
   tracking: ['addProgress', 'taskTimeline', 'todayView', 'openTasksView', 'completedView', 'abortedView', 'addToToday', 'removeFromToday',

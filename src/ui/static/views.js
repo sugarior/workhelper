@@ -874,13 +874,16 @@ export async function renderToday(root) {
 /** 当前展开的项目；null 表示显示项目列表 */
 let openProjectId = null;
 
+/** 项目页签的当前筛选：是否显示已归档（页面内保留，切走再回来不跳回默认） */
+let showArchivedProjects = false;
+
 export async function renderProjects(root) {
   if (openProjectId !== null) {
     await renderProjectTree(root, openProjectId);
     return;
   }
 
-  const projects = await api.listProjects();
+  const projects = await api.listProjects({ includeArchived: showArchivedProjects });
   const titleInput = el('input', { type: 'text', placeholder: '新项目名称（Enter 创建）' });
   const goalInput = el('input', { type: 'text', placeholder: '目标（可留空）' });
   const createButton = el('button', { class: 'primary' }, '新建项目');
@@ -908,7 +911,18 @@ export async function renderProjects(root) {
   }
   createButton.addEventListener('click', () => void submitProject());
 
-  const createRow = el('div', { class: 'toolbar' }, [titleInput, goalInput, createButton]);
+  const createRow = el('div', { class: 'toolbar' }, [
+    titleInput,
+    goalInput,
+    createButton,
+    // 已归档的项目默认不显示（不干扰），但必须能找回来 ——
+    // 否则「归档」等于一去不返，你不会知道归档过什么
+    el('button', {
+      class: showArchivedProjects ? 'primary' : '',
+      title: '归档 = 不做了。默认不显示，需要时能找回',
+      onclick: () => { showArchivedProjects = !showArchivedProjects; void reload(); },
+    }, showArchivedProjects ? '隐藏已归档' : '显示已归档'),
+  ]);
 
   if (projects.length === 0) {
     mount(root, [
@@ -935,24 +949,41 @@ export async function renderProjects(root) {
           total > 0 ? el('span', { class: 'tag' }, `${percent}%`) : null,
           tree.project.goal !== null ? el('span', { class: 'item-raw' }, tree.project.goal) : null,
           el('span', { class: 'spacer', style: 'flex:1' }),
+          tree.project.status === 'archived' ? el('span', { class: 'tag tag-text' }, '已归档') : null,
           el('button', {
             onclick: () => {
               openProjectId = tree.project.id;
               void reload();
             },
           }, '打开'),
-          el('button', {
-            class: 'danger',
-            onclick: (event) => void withBusy(event.target, async () => {
-              const confirmed = window.confirm(
-                `删除项目「${tree.project.title}」？\n其下 ${total} 个任务会保留，但不再归属该项目。`,
-              );
-              if (!confirmed) return;
-              await api.deleteProject(tree.project.id);
-              flash('项目已删除');
-              await reload();
-            }),
-          }, '删除'),
+          // 「归档」而不是「删除」（与任务的「中止」对称）。
+          // 项目一旦创建就带有历史价值（进展、任务、挂靠的资料），
+          // 不做了应该标终止状态 —— 删掉会让这些一起失去归属，
+          // 也会在回收站里制造"历史已删除"条目（§4.3 明确那个栏目本该是死的）。
+          tree.project.status === 'archived'
+            ? el('button', {
+              title: '把项目恢复为进行中',
+              onclick: (event) => void withBusy(event.target, async () => {
+                await api.updateProject(tree.project.id, { status: 'active' });
+                flash('已恢复');
+                await reload();
+              }),
+            }, '恢复')
+            : el('button', {
+              title: '不做了 —— 保留任务、进展与资料，从默认列表移除',
+              onclick: (event) => void withBusy(event.target, async () => {
+                const confirmed = window.confirm(
+                  `归档项目「${tree.project.title}」？\n\n` +
+                  `· ${total} 个任务会保留，仍可在「全部」页找到\n` +
+                  '· 它的进展记录与挂靠的资料都保留\n' +
+                  '· 只是从默认项目列表里移除，可用「显示已归档」找回',
+                );
+                if (!confirmed) return;
+                await api.updateProject(tree.project.id, { status: 'archived' });
+                flash('已归档（可用「显示已归档」找回）');
+                await reload();
+              }),
+            }, '归档'),
         ]),
       ]);
     })),
