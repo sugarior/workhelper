@@ -11,6 +11,7 @@ import {
   getDayBoundaryHour, getSetting, setSetting,
 } from '../repo/index.ts';
 import { parseDate, stripParsedDate } from '../day/parseDate.ts';
+import { createIndexer } from './indexer.ts';
 import { dayKeyFromIso, nowIso } from '../domain/clock.ts';
 import { todayKey } from '../day/dayKey.ts';
 import { InvalidTransitionError } from '../domain/errors.ts';
@@ -42,31 +43,14 @@ interface UndoRecord {
 const UNDO_SETTING_KEY = 'capture.undoLog';
 const MAX_UNDO_BATCH = 200;
 
-/** 从分类结果里挑出"本次新建的实体"，供撤销时反向清理 */
+/**
+ * 从分类结果里挑出"本次新建的实体"，供撤销时反向清理 */
 function toCreatedRefs(results: readonly ClassifyResult[]): { kind: 'task' | 'archive'; id: string }[] {
   return results
     .filter((result): result is ClassifyResult & { createdKind: 'task' | 'archive' } =>
       result.createdKind === 'task' || result.createdKind === 'archive',
     )
     .map((result) => ({ kind: result.createdKind, id: result.createdId }));
-}
-
-/**
- * 写入检索索引。索引失败绝不能影响捕获：
- * 出问题时只记一行警告，内容仍已安全落库，可用 search.reindexAll() 重建。
- */
-function indexInbox(database: DatabaseSync, item: InboxItem): void {
-  try {
-    indexEntity(database, {
-      entityType: 'inbox',
-      entityId: item.id,
-      title: '',
-      // 原文一并入索引，这样按"下周三"这类被剥离的片段也能搜回原始输入
-      body: `${item.body} ${item.rawInput ?? ''}`.trim(),
-    });
-  } catch (error) {
-    console.warn(`[capture] 索引收件箱条目失败（不影响保存）：${String(error)}`);
-  }
 }
 
 export interface CaptureService {
@@ -89,6 +73,7 @@ export interface CaptureService {
 }
 
 export function createCaptureService(database: DatabaseSync): CaptureService {
+  const indexer = createIndexer(database);
   const boundaryHour = (): number => getDayBoundaryHour(database);
 
   function currentDayKey(): string {
@@ -129,6 +114,9 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
         dayKey,
       });
       markConverted(database, id, `archive:${archive.id}`);
+      // 资料条目必须进索引：需求 F-11 要求能搜到资料全文。
+      // 这里曾经漏接，导致分类产生的资料永远搜不到。
+      indexer.archive(archive);
       return { inboxId: id, createdKind: 'archive', createdId: archive.id };
     }
 
@@ -140,6 +128,7 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
       sourceInboxId: id,
     });
     markConverted(database, id, `task:${task.id}`);
+    indexer.task(task);
     return { inboxId: id, createdKind: 'task', createdId: task.id };
   }
 
@@ -168,7 +157,7 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
           rawInput,
         }),
       );
-      indexInbox(database, item);
+      indexer.inbox(item);
       return { item, parsed, title };
     },
 

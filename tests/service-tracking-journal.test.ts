@@ -286,6 +286,122 @@ test('推进：已完成任务不能重复完成', () => {
   });
 });
 
+test('可见性契约：任何未结束任务都必须出现在「全部」视图里', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const today = todayOf(database);
+
+    // 覆盖所有"曾经会沉底"的形态，外加正常形态
+    const noDueNoProject = planning.createTask({ title: '无截止日期无项目' });
+    const futureDue = planning.createTask({ title: '未来截止', dueDate: '2099-12-31' });
+    const pastDue = planning.createTask({ title: '已逾期', dueDate: '2020-01-01' });
+    const dueTodayTask = planning.createTask({ title: '今天到期', dueDate: today });
+    const project = planning.createProject({ title: '某项目' });
+    const inProject = planning.createTask({ title: '项目内无截止', projectId: project.id });
+    const doing = planning.createTask({ title: '进行中' });
+    const blocked = planning.createTask({ title: '卡住的' });
+    planning.setTaskStatus(doing.id, 'doing');
+    planning.setTaskStatus(blocked.id, 'doing');
+    planning.setTaskStatus(blocked.id, 'blocked', { blockedReason: '等回复' });
+    const finished = planning.createTask({ title: '已完成的' });
+    tracking.completeTask(finished.id);
+
+    const view = tracking.openTasksView(today);
+    const shown = new Set([
+      ...view.overdue, ...view.dueToday, ...view.doing, ...view.blocked, ...view.scheduled, ...view.unscheduled,
+    ].map((task) => task.id));
+
+    // 这是我犯过的错：界面顶上说"未结束 3"，下面一条都不显示
+    for (const task of [noDueNoProject, futureDue, pastDue, dueTodayTask, inProject, doing, blocked]) {
+      assert.ok(shown.has(task.id), `「${task.title}」必须出现在全部视图中`);
+    }
+    assert.equal(shown.has(finished.id), false, '已完成的不应出现在未结束视图');
+    assert.equal(view.total, 7, `未结束总数应为 7，实际 ${view.total}`);
+    assert.equal(shown.size, view.total, '分组之间不得重叠，也不得遗漏');
+  });
+});
+
+test('可见性契约：计数与列出的条数一致（页面不得自相矛盾）', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const today = todayOf(database);
+
+    planning.createTask({ title: '无日期无项目' });
+    planning.createTask({ title: '未来截止', dueDate: '2099-12-31' });
+    planning.createTask({ title: '今天到期', dueDate: today });
+
+    const view = tracking.openTasksView(today);
+    const listed = view.overdue.length + view.dueToday.length + view.doing.length
+      + view.blocked.length + view.scheduled.length + view.unscheduled.length;
+    assert.equal(listed, view.total, '列出的条数必须等于计数');
+
+    // 今日视图只收录有日期或已排期的，剩下的必须被「全部」兜住
+    const todayView = tracking.todayView(today);
+    const todayIds = new Set([
+      ...todayView.overdue, ...todayView.dueToday, ...todayView.planned, ...todayView.blocked,
+    ].map((task) => task.id));
+    assert.equal(view.total - todayIds.size, 2, '无日期与未来截止这两条不在今日视图（这正是问题来源）');
+  });
+});
+
+test('可见性契约：分组优先级 —— 正在做的不算逾期，卡住的优先于时间维度', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const today = todayOf(database);
+
+    const doingLate = planning.createTask({ title: '逾期但在做', dueDate: '2020-01-01' });
+    planning.setTaskStatus(doingLate.id, 'doing');
+
+    const blockedLate = planning.createTask({ title: '逾期且卡住', dueDate: '2020-01-01' });
+    planning.setTaskStatus(blockedLate.id, 'doing');
+    planning.setTaskStatus(blockedLate.id, 'blocked', { blockedReason: '外部依赖' });
+
+    planning.createTask({ title: '真的逾期', dueDate: '2020-01-01' });
+
+    const view = tracking.openTasksView(today);
+    assert.deepEqual(view.doing.map((task) => task.title), ['逾期但在做']);
+    assert.deepEqual(view.blocked.map((task) => task.title), ['逾期且卡住']);
+    assert.deepEqual(view.overdue.map((task) => task.title), ['真的逾期']);
+    assert.equal(view.overdueCount, 1, '只有真正未开始且逾期的才算逾期');
+  });
+});
+
+test('可见性契约：手工排入今日的任务计入「今天到期」组', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const today = todayOf(database);
+
+    const task = planning.createTask({ title: '没有截止日但排入今日' });
+    tracking.addToToday(task.id, today);
+
+    const view = tracking.openTasksView(today);
+    assert.deepEqual(view.dueToday.map((item) => item.title), ['没有截止日但排入今日']);
+    assert.equal(view.unscheduled.length, 0, '排入今日后不应再算"没有排期"');
+  });
+});
+
+test('可见性契约：完成后立即从未结束视图消失，重开后回来', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const today = todayOf(database);
+
+    const task = planning.createTask({ title: '任务' });
+    assert.equal(tracking.openTasksView(today).total, 1);
+
+    tracking.completeTask(task.id);
+    assert.equal(tracking.openTasksView(today).total, 0);
+
+    // reopenTask 归 planning 服务（它是结构操作），不在 tracking 上
+    planning.reopenTask(task.id);
+    assert.equal(tracking.openTasksView(today).total, 1, '重开后应回来');
+  });
+});
+
 test('日志：汇总覆盖完成、新增、卡点、顺延与时间线', () => {
   useDb((database) => {
     const planning = createPlanningService(database);

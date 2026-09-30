@@ -1,6 +1,30 @@
 // 极简 DOM 工具。不引入框架——界面规模不足以抵消框架带来的构建与调试成本。
 
-/** 创建元素：el('div', {class:'x'}, '文本' | [子元素]) */
+/**
+ * 递归摊平 children，并丢掉 null/undefined/false。
+ *
+ * 为什么必须递归：调用处很自然会写成"数组里套数组"
+ * （例如 `mount(root, [标题, 统计, 区块数组])`），
+ * 若只判断最外层，内层数组会走到 `String(child)` 分支，
+ * 页面上就出现 `[object HTMLDivElement]` —— 本项目真实发生过。
+ */
+function flattenNodes(input, out = []) {
+  if (input === null || input === undefined || input === false) return out;
+  if (Array.isArray(input)) {
+    for (const item of input) flattenNodes(item, out);
+    return out;
+  }
+  out.push(input);
+  return out;
+}
+
+function appendAll(node, children) {
+  for (const child of flattenNodes(Array.isArray(children) ? children : [children])) {
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  }
+}
+
+/** 创建元素：el('div', {class:'x'}, '文本' | [子元素] | [[嵌套子元素]]) */
 export function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
@@ -15,11 +39,7 @@ export function el(tag, attrs = {}, children = []) {
       node.setAttribute(key, String(value));
     }
   }
-  const list = Array.isArray(children) ? children : [children];
-  for (const child of list) {
-    if (child === null || child === undefined || child === false) continue;
-    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
-  }
+  appendAll(node, children);
   return node;
 }
 
@@ -29,11 +49,7 @@ export function clear(node) {
 
 export function mount(node, children) {
   clear(node);
-  const list = Array.isArray(children) ? children : [children];
-  for (const child of list) {
-    if (child === null || child === undefined || child === false) continue;
-    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
-  }
+  appendAll(node, children);
 }
 
 export function shortId(id) {

@@ -32,7 +32,18 @@ const CN_DIGITS: Readonly<Record<string, number>> = {
   零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
 };
 
-const WEEKDAY_DIGITS: Readonly<Record<string, number>> = { 日: 0, 天: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6 };
+/**
+ * 星期字符 → JS 的 getDay() 取值（0 = 周日）。
+ *
+ * 必须同时包含阿拉伯数字与中文数字：解析正则是 `([1-7日天一二三四五六])`，
+ * 它接受两种写法。曾经这里只有中文键，于是"周1""星期7"虽然被正则匹配到、
+ * 却在查表时得到 undefined 并**静默返回 null**（不是继续尝试其它规则）。
+ * 这类"正则接受但查表缺失"的缺口不会报错，只会表现为"某种写法莫名不生效"。
+ */
+const WEEKDAY_DIGITS: Readonly<Record<string, number>> = {
+  日: 0, 天: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6,
+  1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 0,
+};
 
 const RELATIVE_DAYS: Readonly<Record<string, number>> = {
   今天: 0, 今日: 0, 明天: 1, 明日: 1, 后天: 2, 大后天: 3, 昨天: -1, 昨日: -1, 前天: -2,
@@ -164,7 +175,22 @@ export function parseDate(input: string, options: ParseDateOptions): ParsedDate 
     }
   }
 
-  // 5) N 天后 / N 天前（支持中文数字）
+  // 5) 裸星期：周三 / 星期五 / 礼拜二
+  //    语义与"下周X"不同：裸星期指**下一个到来**的该星期，而不是下一自然周的那天。
+  //    这是中文口语的习惯——今天周三说"周三"，指的就是下周三，因为今天已经过了。
+  //    位置必须在 4) 之后，否则会抢走"下周三""本周五"这类带前缀的写法。
+  {
+    const matched = /(?:周|星期|礼拜)\s*([1-7日天一二三四五六])/.exec(input);
+    if (matched?.[1] !== undefined) {
+      const target = WEEKDAY_DIGITS[matched[1]];
+      if (target === undefined) return null;
+      let offset = forwardWeekdayOffset(target, today);
+      if (offset === 0) offset = 7; // 今天就是这一天 → 指下一个
+      return { dayKey: addDaysToKey(today, offset), matched: matched[0], rule: 'bare-weekday', precision: 'day' };
+    }
+  }
+
+  // 6) N 天后 / N 天前（支持中文数字）
   {
     const matched = /(\d+|[一二三四五六七八九十]+)\s*天\s*(后|以后|之后)/.exec(input);
     if (matched?.[1] !== undefined && matched[2] !== undefined) {
@@ -182,7 +208,7 @@ export function parseDate(input: string, options: ParseDateOptions): ParsedDate 
     }
   }
 
-  // 6) 今天 / 明天 / 后天 / 昨天 …
+  // 7) 今天 / 明天 / 后天 / 昨天 …
   //    放在最后：若文本同时含"明天"与具体日期，具体日期优先级更高
   {
     const matched = /今天|今日|明天|明日|大后天|后天|昨天|昨日|前天/.exec(input);
@@ -196,11 +222,28 @@ export function parseDate(input: string, options: ParseDateOptions): ParsedDate 
   return null;
 }
 
-/** 从标题中剥离已解析的日期片段，得到干净的标题 */
+/**
+ * 从标题中剥离已解析的日期片段，得到干净的标题。
+ *
+ * 拼接两侧时留一个空格作为占位，然后按语言习惯收紧：
+ * 中文紧挨中文时不需要空格（"写一份下周三要交的接口文档" 应得 "写一份要交的接口文档"，
+ * 而不是 "写一份 要交的接口文档"），但中文紧挨英文时要保留，
+ * 否则会粘连成不可读的一串。
+ */
 export function stripParsedDate(text: string, parsed: ParsedDate | null): string {
   if (parsed === null) return text.trim();
   const index = text.indexOf(parsed.matched);
   if (index === -1) return text.trim();
-  const cleaned = `${text.slice(0, index)} ${text.slice(index + parsed.matched.length)}`;
-  return cleaned.replace(/\s+/g, ' ').trim();
+
+  const left = text.slice(0, index);
+  const right = text.slice(index + parsed.matched.length);
+
+  // 中日韩文字与全角标点：这类字符两侧不需要空格
+  const CJK_CLASS = '[\\u3000-\\u303f\\u4e00-\\u9fff\\u3400-\\u4dbf\\uff00-\\uffef]';
+
+  return `${left} ${right}`
+    // 空格左侧是中文、右侧也是中文 → 去掉空格
+    .replace(new RegExp(`(${CJK_CLASS}) (${CJK_CLASS})`, 'g'), '$1$2')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
 }

@@ -50,9 +50,12 @@ export async function renderInbox(root) {
       return;
     }
     await withBusy(button, async () => {
-      // 只有一条时走单条接口，便于将来区分两种返回形状
-      if (ids.length === 1) await api.classify({ id: ids[0], target });
-      else await api.classifyMany({ ids, target });
+      // api.classify / classifyMany 收的是**位置参数**：
+      // classify(id, target) 与 classifyMany(ids, target)。
+      // 传 { id, target } 这种对象会让第一个参数变成整个对象，
+      // 服务端随即报 "Unknown named parameter 'id'" —— 本项目已因此踩坑两次。
+      if (ids.length === 1) await api.classify(ids[0], target);
+      else await api.classifyMany(ids, target);
       flash(`已处理 ${ids.length} 条`);
       await reload();
     });
@@ -107,14 +110,14 @@ export async function renderInbox(root) {
       el('div', { class: 'row-actions' }, [
         el('button', {
           onclick: (event) => void withBusy(event.target, async () => {
-            await api.classify({ id: item.id, target: taskTarget() });
+            await api.classify(item.id, taskTarget());
             flash('已转成任务');
             await reload();
           }),
         }, '转任务'),
         el('button', {
           onclick: (event) => void withBusy(event.target, async () => {
-            await api.classify({ id: item.id, target: { kind: 'archive', archiveKind: 'note' } });
+            await api.classify(item.id, { kind: 'archive', archiveKind: 'note' });
             flash('已存为资料');
             await reload();
           }),
@@ -122,7 +125,7 @@ export async function renderInbox(root) {
         el('button', {
           class: 'danger',
           onclick: (event) => void withBusy(event.target, async () => {
-            await api.classify({ id: item.id, target: { kind: 'discard' } });
+            await api.classify(item.id, { kind: 'discard' });
             await reload();
           }),
         }, '丢弃'),
@@ -138,125 +141,181 @@ export async function renderInbox(root) {
 }
 
 // ============================================================
-// 今日（F-08 / F-09）
+// 全部未结束（F-09 / 需求 §6.6 可见性约束）
 // ============================================================
+
+/**
+ * 这一页的存在理由：捕获时不允许要求分类或排期（契约 2），
+ * 因此"无截止日期、无项目"是合法状态。没有这一页，这类任务就永久沉底。
+ * 渲染上刻意分组且组内不重复，让"总共有多少事悬着"一眼可见。
+ */
+export async function renderAll(root) {
+  const view = await api.openTasksView();
+  const dayKey = view.dayKey;
+
+  const GROUPS = [
+    ['overdue', '逾期', 'overdue'],
+    ['dueToday', '今天到期', ''],
+    ['doing', '进行中', ''],
+    ['blocked', '卡住', 'blocked'],
+    ['scheduled', '已排期（未来）', ''],
+    ['unscheduled', '没有排期', 'warn'],
+  ];
+
+  /** 复用今日页那一行的交互（记一笔 / 排入今日 / 状态推进 / 完成） */
+  function taskRow(task, extraTag) {
+    return buildTaskRow(task, dayKey, extraTag, reload);
+  }
+
+  const rendered = GROUPS
+    .map(([key, label, className]) => ({ key, label, className, tasks: view[key] ?? [] }))
+    .filter((group) => group.tasks.length > 0);
+
+  const header = el('div', { class: 'summary-grid' }, [
+    el('div', { class: 'summary-stat' }, [el('b', {}, String(view.total)), el('span', {}, '未结束总数')]),
+    el('div', { class: 'summary-stat' }, [el('b', {}, String(view.overdueCount)), el('span', {}, '已逾期')]),
+    el('div', { class: 'summary-stat' }, [
+      el('b', {}, String(view.unscheduled?.length ?? 0)),
+      el('span', {}, '没有排期'),
+    ]),
+  ]);
+
+  if (view.total === 0) {
+    mount(root, [
+      el('h2', {}, '全部未结束'),
+      header,
+      el('div', { class: 'empty' }, '没有未结束的任务。'),
+    ]);
+    return;
+  }
+
+  mount(root, [
+    el('h2', {}, ['全部未结束 ', el('span', { class: 'count' }, `${view.total} 条`)]),
+    header,
+    rendered.map((group) => el('div', {}, [
+      el('h2', { class: `section-title ${group.className}` }, [
+        group.label, el('span', { class: 'count' }, `${group.tasks.length} 条`),
+      ]),
+      el('ul', { class: 'list' }, group.tasks.map((task) => taskRow(task))),
+    ])),
+  ]);
+}
+
+// ============================================================
+// 今日（F-08 / F-10）
+// ============================================================
+
+/**
+ * 任务行的统一构造：今日页与「全部」页共用，避免两处交互逐渐分叉。
+ * 返回一个 li 元素；任何状态推进都会触发 onChanged 重绘。
+ */
+function buildTaskRow(task, dayKey, extraTag, onChanged) {
+  const tags = [];
+  if (task.dueDate !== null) {
+    const isOverdue = task.dueDate < dayKey && task.status !== 'done';
+    tags.push(el('span', { class: `tag ${isOverdue ? 'overdue' : ''}` },
+      `${isOverdue ? '逾期' : '截止'} ${task.dueDate}`));
+  }
+  if (task.priority === 'high') tags.push(el('span', { class: 'tag high' }, '高优先'));
+  if (task.status === 'blocked' && task.blockedReason !== null) {
+    tags.push(el('span', { class: 'tag blocked' }, `卡在：${task.blockedReason}`));
+  }
+  if (task.status === 'doing') tags.push(el('span', { class: 'tag due' }, '进行中'));
+  if (extraTag !== undefined) tags.push(el('span', { class: 'tag' }, extraTag));
+
+  const progressBox = el('div');
+  const noteInput = el('input', { type: 'text', placeholder: '追加一句进展…（Enter 提交）' });
+  const noteKind = el('select', {}, [
+    el('option', { value: 'progress' }, '进展'),
+    el('option', { value: 'blocker' }, '卡点'),
+    el('option', { value: 'decision' }, '决定'),
+    el('option', { value: 'waiting' }, '等待'),
+  ]);
+
+  noteInput.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    void withBusy(noteInput, async () => {
+      const body = noteInput.value.trim();
+      if (body.length === 0) return;
+      await api.addProgress({ target: { kind: 'task', id: task.id }, kind: noteKind.value, body });
+      flash('已记录');
+      await onChanged();
+    });
+  });
+
+  function toggleProgress() {
+    if (progressBox.childElementCount > 0) {
+      clear(progressBox);
+      return;
+    }
+    mount(progressBox, el('div', { class: 'toolbar' }, [noteKind, noteInput]));
+    noteInput.focus();
+  }
+
+  const push = (label, action, className) => el('button', {
+    class: className,
+    onclick: (event) => void withBusy(event.target, action),
+  }, label);
+
+  const actions = [push('记一笔', async () => toggleProgress())];
+
+  if (task.status === 'todo') {
+    actions.push(push('开始', async () => {
+      await api.startTask(task.id);
+      await onChanged();
+    }));
+  }
+  if (task.status === 'doing') {
+    actions.push(push('卡住', async () => {
+      const reason = window.prompt('卡在哪里？');
+      if (reason === null || reason.trim().length === 0) return;
+      await api.blockTask(task.id, reason.trim());
+      await onChanged();
+    }));
+  }
+  if (task.status === 'blocked') {
+    actions.push(push('解除', async () => {
+      await api.unblockTask(task.id);
+      await onChanged();
+    }));
+  }
+
+  if (task.plannedFor !== dayKey) {
+    actions.push(push('排入今日', async () => {
+      await api.addToToday(task.id);
+      flash('已排入今日');
+      await onChanged();
+    }));
+  } else {
+    actions.push(push('移出今日', async () => {
+      await api.removeFromToday(task.id);
+      await onChanged();
+    }));
+  }
+
+  actions.push(push('完成', async () => {
+    await api.finishTask(task.id);
+    flash('已完成');
+    await onChanged();
+  }, 'primary'));
+
+  return el('li', {}, [
+    el('span', {}, STATUS_MARK[task.status] ?? '·'),
+    el('div', { class: 'item-body' }, [
+      el('div', { class: 'item-title' }, task.title),
+      tags.length > 0 ? el('div', { class: 'item-meta' }, tags) : null,
+      progressBox,
+    ]),
+    el('div', { class: 'row-actions' }, actions),
+  ]);
+}
 
 export async function renderToday(root) {
   const view = await api.todayView();
   const dayKey = view.dayKey;
 
-  /** 一行任务：状态、标题、标签、操作、可展开的进展输入 */
-  function taskRow(task, extraTag) {
-    const tags = [];
-    if (task.dueDate !== null) {
-      tags.push(el('span', { class: `tag ${task.dueDate < dayKey && task.status !== 'done' ? 'overdue' : ''}` },
-        `${task.dueDate < dayKey ? '逾期' : '截止'} ${task.dueDate}`));
-    }
-    if (task.priority === 'high') tags.push(el('span', { class: 'tag high' }, '高优先'));
-    if (task.status === 'blocked' && task.blockedReason !== null) {
-      tags.push(el('span', { class: 'tag blocked' }, `卡在：${task.blockedReason}`));
-    }
-    if (extraTag !== undefined) tags.push(el('span', { class: 'tag' }, extraTag));
-
-    const progressBox = el('div');
-    const noteInput = el('input', { type: 'text', placeholder: '追加一句进展…（Enter 提交）' });
-    const noteKind = el('select', {}, [
-      el('option', { value: 'progress' }, '进展'),
-      el('option', { value: 'blocker' }, '卡点'),
-      el('option', { value: 'decision' }, '决定'),
-      el('option', { value: 'waiting' }, '等待'),
-    ]);
-
-    const submitNote = async () => {
-      const body = noteInput.value.trim();
-      if (body.length === 0) return;
-      await api.addProgress({
-        target: { kind: 'task', id: task.id },
-        kind: noteKind.value,
-        body,
-      });
-      flash('已记录');
-      await reload();
-    };
-    noteInput.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        void withBusy(noteInput, submitNote);
-      }
-    });
-
-    function toggleProgress() {
-      if (progressBox.childElementCount > 0) {
-        clear(progressBox);
-        return;
-      }
-      mount(progressBox, el('div', { class: 'toolbar' }, [noteKind, noteInput]));
-      noteInput.focus();
-    }
-
-    const actions = [
-      el('button', { onclick: () => void toggleProgress() }, '记一笔'),
-    ];
-    if (task.status === 'todo') {
-      actions.push(el('button', {
-        onclick: (event) => void withBusy(event.target, async () => {
-          await api.startTask(task.id);
-          await reload();
-        }),
-      }, '开始'));
-    }
-    if (task.status === 'doing') {
-      actions.push(el('button', {
-        onclick: (event) => void withBusy(event.target, async () => {
-          const reason = window.prompt('卡在哪里？');
-          if (reason === null || reason.trim().length === 0) return;
-          await api.blockTask(task.id, reason.trim());
-          await reload();
-        }),
-      }, '卡住'));
-    }
-    if (task.status === 'blocked') {
-      actions.push(el('button', {
-        onclick: (event) => void withBusy(event.target, async () => {
-          await api.unblockTask(task.id);
-          await reload();
-        }),
-      }, '解除'));
-    }
-    if (task.plannedFor !== dayKey) {
-      actions.push(el('button', {
-        onclick: (event) => void withBusy(event.target, async () => {
-          await api.addToToday(task.id);
-          await reload();
-        }),
-      }, '排入今日'));
-    } else {
-      actions.push(el('button', {
-        onclick: (event) => void withBusy(event.target, async () => {
-          await api.removeFromToday(task.id);
-          await reload();
-        }),
-      }, '移出今日'));
-    }
-    actions.push(el('button', {
-      class: 'primary',
-      onclick: (event) => void withBusy(event.target, async () => {
-        await api.finishTask(task.id);
-        flash('已完成');
-        await reload();
-      }),
-    }, '完成'));
-
-    return el('li', {}, [
-      el('span', {}, STATUS_MARK[task.status] ?? '·'),
-      el('div', { class: 'item-body' }, [
-        el('div', { class: 'item-title' }, task.title),
-        tags.length > 0 ? el('div', { class: 'item-meta' }, tags) : null,
-        progressBox,
-      ]),
-      el('div', { class: 'row-actions' }, actions),
-    ]);
-  }
+  const taskRow = (task, extraTag) => buildTaskRow(task, dayKey, extraTag, reload);
 
   function section(title, tasks, className, extraTag) {
     if (tasks.length === 0) return null;
@@ -281,10 +340,35 @@ export async function renderToday(root) {
     el('div', { class: 'summary-stat' }, [el('b', {}, String(view.inboxCount)), el('span', {}, '收件箱待处理')]),
   ]);
 
+  // 契约 V2：这一页不能自相矛盾。若上面说还有未结束的任务，
+  // 而下面四组加起来没覆盖完，必须显式告诉我去哪里看剩下的。
+  const shown = new Set([
+    ...view.overdue, ...view.dueToday, ...view.planned, ...view.blocked,
+  ].map((task) => task.id));
+  const hidden = view.counts.open - shown.size;
+
   mount(root, [
     el('h2', {}, [`今日 · ${dayKey}`]),
     stats,
-    blocks.length > 0 ? blocks : el('div', { class: 'empty' }, '今天没有待办事项。'),
+    hidden > 0
+      ? el('div', { class: 'summary-block' }, [
+        el('h3', {}, '还有未结束的任务不在这里'),
+        el('div', {}, [
+          `另有 ${hidden} 条未结束任务既不到期也没排进今天。`,
+        ]),
+        el('div', { class: 'toolbar' }, [
+          el('button', {
+            onclick: async () => {
+              // 通过点页签切换，保持与手动点击同一条路径
+              const tab = document.querySelector('#tabs button[data-tab="all"]');
+              if (tab !== null) tab.click();
+            },
+          }, `去「全部」看这 ${hidden} 条`),
+          el('span', { class: 'item-raw' }, '它们没有消失，只是还没排期。'),
+        ]),
+      ])
+      : null,
+    blocks.length > 0 ? blocks : el('div', { class: 'empty' }, '今天没有到期或已排期的任务。'),
   ]);
 }
 

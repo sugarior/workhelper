@@ -3,15 +3,17 @@
 
 import { api } from '/api.js';
 import { el, mount, shortId } from '/dom.js';
-import { renderInbox, renderToday, renderProjects, renderLog, setRefreshHook } from '/views.js';
+import { renderInbox, renderAll, renderToday, renderProjects, renderLog, setRefreshHook } from '/views.js';
 
 const viewBox = document.getElementById('view');
 const tabsBox = document.getElementById('tabs');
-const badge = document.getElementById('badge-inbox');
+const inboxBadge = document.getElementById('badge-inbox');
+const openBadge = document.getElementById('badge-open');
 const searchInput = document.getElementById('search');
 
 const RENDERERS = {
   inbox: renderInbox,
+  all: renderAll,
   today: renderToday,
   projects: renderProjects,
   log: renderLog,
@@ -26,14 +28,29 @@ async function refresh(tab = currentTab) {
 }
 setRefreshHook(refresh);
 
-/** 收件箱待处理数量：用数字提醒积压，而不是用红点催促（需求 §6.5） */
-async function refreshBadge() {
+/**
+ * 两个计数徽标：收件箱积压 与 全部未结束任务。
+ *
+ * 后者是需求 §6.6 契约 V3 的落点 —— 未结束的任务数必须常驻可见，
+ * 否则"零门槛捕获"会变成"零门槛丢事"而我不知道。
+ */
+async function refreshBadges() {
   try {
-    const total = await api.countPending();
-    badge.textContent = String(total);
-    badge.classList.toggle('zero', total === 0);
+    const pending = await api.countPending();
+    inboxBadge.textContent = String(pending);
+    inboxBadge.classList.toggle('zero', pending === 0);
   } catch {
-    badge.classList.add('zero');
+    inboxBadge.classList.add('zero');
+  }
+
+  try {
+    const view = await api.openTasksView();
+    openBadge.textContent = String(view.total);
+    openBadge.classList.toggle('zero', view.total === 0);
+    // 有逾期时用红色提醒：这不是催促，是事实
+    openBadge.classList.toggle('alert', view.overdueCount > 0);
+  } catch {
+    openBadge.classList.add('zero');
   }
 }
 
@@ -51,7 +68,7 @@ async function render(tab) {
   } catch (error) {
     mount(viewBox, el('div', { class: 'empty' }, `加载失败：${error.message}`));
   }
-  void refreshBadge();
+  void refreshBadges();
 }
 
 tabsBox.addEventListener('click', (event) => {

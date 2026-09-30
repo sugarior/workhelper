@@ -61,11 +61,11 @@ const ALLOWED: Readonly<Record<string, readonly string[]>> = {
   planning: ['listProjects', 'projectTree', 'createProject', 'deleteProject',
     'listTasks', 'createTask', 'completeTask', 'reopenTask',
     'createSubtask', 'setSubtaskStatus', 'reorder'],
-  tracking: ['addProgress', 'taskTimeline', 'todayView', 'addToToday', 'removeFromToday',
+  tracking: ['addProgress', 'taskTimeline', 'todayView', 'openTasksView', 'addToToday', 'removeFromToday',
     'startTask', 'blockTask', 'unblockTask', 'completeTask'],
   journal: ['summarize', 'save'],
   search: ['search'],
-  system: ['settings', 'backup', 'integrityCheck'],
+  system: ['getSettings', 'backup', 'integrityCheck'],
 };
 
 function sendJson(response: ServerResponse, status: number, payload: unknown): void {
@@ -131,8 +131,10 @@ function serveStatic(response: ServerResponse, filePath: string): void {
   response.writeHead(200, {
     'content-type': mime,
     'content-length': body.length,
-    // 界面是本地开发工具，禁用缓存以免改了代码看不到效果
-    'cache-control': 'no-store',
+    // no-cache（而非 no-store）= 每次都必须向服务端校验。
+    // 本地服务重校验几乎无成本，却能避免"改了前端代码、浏览器还在跑旧版"
+    // 这类极难定位的问题——本项目已经因此被误导过一次。
+    'cache-control': 'no-cache',
   });
   response.end(body);
 }

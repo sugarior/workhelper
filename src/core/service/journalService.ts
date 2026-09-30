@@ -13,6 +13,7 @@ import {
   saveDailyLog,
 } from '../repo/index.ts';
 import { getDayBoundaryHour } from '../repo/settingsRepo.ts';
+import { createIndexer } from './indexer.ts';
 import { dayRange } from '../day/dayKey.ts';
 import type { ArchiveItem, DailyLog, InboxItem, ProgressEntry, Subtask, Task } from '../domain/types.ts';
 
@@ -52,6 +53,8 @@ export interface JournalService {
 }
 
 export function createJournalService(database: DatabaseSync): JournalService {
+  const indexer = createIndexer(database);
+
   return {
     summarize(dayKey) {
       const { start, end } = dayRange(dayKey, getDayBoundaryHour(database));
@@ -99,7 +102,13 @@ export function createJournalService(database: DatabaseSync): JournalService {
     },
 
     save(dayKey, body) {
-      return withTx(database, () => saveDailyLog(database, dayKey, body));
+      return withTx(database, () => {
+        const entry = saveDailyLog(database, dayKey, body);
+        // 日志正文也要进索引：需求 F-11 要求能搜到日志全文。
+        // 这里曾经漏接，导致日志内容搜不到。
+        indexer.log(entry);
+        return entry;
+      });
     },
 
     list(options = {}) {
@@ -107,7 +116,11 @@ export function createJournalService(database: DatabaseSync): JournalService {
     },
 
     delete(dayKey) {
-      withTx(database, () => deleteDailyLog(database, dayKey));
+      withTx(database, () => {
+        const existing = getDailyLog(database, dayKey);
+        deleteDailyLog(database, dayKey);
+        if (existing !== undefined) indexer.remove('log', existing.id);
+      });
     },
   };
 }

@@ -100,6 +100,35 @@ test('跨年与跨月边界', () => {
   assert.equal(parseDate('明天', { today: '2026-02-28' })?.dayKey, '2026-03-01');
 });
 
+test('裸星期指下一个到来的该星期', () => {
+  // 基准日 2026-09-30 是周三
+  assert.equal(parse('周三要交接口文档')?.dayKey, '2026-10-07', '今天就是周三 → 指下一个周三');
+  assert.equal(parse('周三')?.rule, 'bare-weekday');
+  assert.equal(parse('周五复盘')?.dayKey, '2026-10-02', '本周内还没到的周五 → 本周五');
+  assert.equal(parse('周一交')?.dayKey, '2026-10-05');
+  assert.equal(parse('星期日休息')?.dayKey, '2026-10-04', '本周内最近的周日');
+  assert.equal(parse('礼拜二')?.dayKey, '2026-10-06');
+  assert.equal(parse('星期1')?.dayKey, '2026-10-05', '支持阿拉伯数字');
+});
+
+test('裸星期与带前缀写法的语义区分', () => {
+  // 刻意区分：
+  //   裸"周五"  = 下一个到来的周五（本周内）
+  //   "下周五"  = 下一个自然周的周五
+  assert.equal(parse('周五')?.dayKey, '2026-10-02', '裸周五 = 本周五');
+  assert.equal(parse('下周五')?.dayKey, '2026-10-09', '下周五 = 下一周');
+  assert.equal(parse('本周五')?.dayKey, '2026-10-02', '本周五与裸周五同义');
+  assert.equal(parse('周三')?.dayKey, '2026-10-07', '本周三已过，两种写法恰好重合');
+  assert.equal(parse('下周三')?.rule, 'next-week-weekday');
+  assert.equal(parse('周三')?.rule, 'bare-weekday');
+});
+
+test('具体日期优先于裸星期', () => {
+  const hit = parse('周三之前完成10月20日的报告');
+  assert.equal(hit?.dayKey, '2026-10-20');
+  assert.equal(hit?.rule, 'month-day');
+});
+
 test('反例：不含完整日期表达式的文本必须解析失败', () => {
   const negatives = [
     '看不见的问题排查',
@@ -109,8 +138,9 @@ test('反例：不含完整日期表达式的文本必须解析失败', () => {
     '讨论一下 3 个方案',
     '把这件事做完',
     '一月份的计划还没写',
-    '周日再说吧',
     '周报要写',
+    '周末计划',
+    '周边调研',
     '天后是谁',
     '百万天后的设想',
     '2026年13月40日不存在',
@@ -137,4 +167,16 @@ test('剥离日期片段得到干净标题', () => {
   assert.equal(stripParsedDate('10月8日交报告', parse('10月8日交报告')), '交报告');
   assert.equal(stripParsedDate(' 纯文本 ', null), '纯文本');
   assert.equal(stripParsedDate('明天', parse('明天')), '');
+});
+
+test('中文之间不残留空格，中文与英文之间保留', () => {
+  // 曾经的真实缺陷：剥离后拼了个空格，得到"写一份 要交的接口文档"
+  assert.equal(
+    stripParsedDate('写一份下周三要交的接口文档', parse('写一份下周三要交的接口文档')),
+    '写一份要交的接口文档',
+  );
+  assert.equal(stripParsedDate('周三提交方案', parse('周三提交方案')), '提交方案');
+  assert.equal(stripParsedDate('完成report周三', parse('完成report周三')), '完成report', '中英相邻不加空格');
+  assert.equal(stripParsedDate('review周三pr', parse('review周三pr')), 'review pr', '英文被日期隔开时保留一个空格');
+  assert.equal(stripParsedDate('给张三 下周三 那份', parse('给张三 下周三 那份')), '给张三 那份', '原文自带的空格保留');
 });

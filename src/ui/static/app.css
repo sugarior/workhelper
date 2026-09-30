@@ -105,6 +105,8 @@ nav.tabs button.active { background: var(--accent-soft); color: var(--accent); f
   text-align: center;
 }
 .badge.zero { display: none; }
+/* 有逾期任务时的未结束计数：用颜色陈述事实，不做动画催促 */
+.badge.alert { background: var(--danger); }
 
 .search-box { margin-left: auto; display: flex; gap: 6px; align-items: center; }
 .search-box input { width: 200px; }
@@ -127,6 +129,7 @@ h2 .count { color: var(--text-dim); font-weight: 400; }
 .section-title { display: flex; align-items: baseline; gap: 8px; }
 .section-title.overdue { color: var(--danger); }
 .section-title.blocked { color: var(--warn); }
+.section-title.warn { color: var(--text-dim); }
 
 .empty { color: var(--text-dim); padding: 14px 0; }
 

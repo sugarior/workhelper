@@ -11,6 +11,9 @@
     <span class="brand">工作秘书</span>
     <nav class="tabs" id="tabs">
       <button data-tab="inbox">收件箱<span class="badge zero" id="badge-inbox">0</span></button>
+      <!-- 「全部」是可见性约束的落点（需求 §6.6 / F-09）：
+           任何未结束任务都必须能在这里找到，包括既无截止日期也无项目的那些 -->
+      <button data-tab="all">全部<span class="badge zero" id="badge-open">0</span></button>
       <button data-tab="today">今日</button>
       <button data-tab="projects">项目</button>
       <button data-tab="log">日志</button>
@@ -23,6 +26,8 @@
 
   <main id="view"></main>
 
-  <script type="module" src="/app.js"></script>
+  <!-- 带版本参数：换了版本号浏览器就会重新拉取，即使此前缓存过。
+       服务端同时发送 no-cache，两者叠加确保改完前端必定生效。 -->
+  <script type="module" src="/app.js?v=0.1.0"></script>
 </body>
 </html>

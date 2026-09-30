@@ -36,6 +36,47 @@ export interface TodayView {
   counts: { open: number; doneToday: number };
 }
 
+/**
+ * 全部未结束任务的聚合（F-09）。
+ *
+ * 存在的理由：捕获时不允许要求分类或排期（需求 §6.2 契约 2），因此
+ * "无截止日期、无项目"是合法且常见的状态。若没有这个视图，这类任务会永久沉底——
+ * "随手记"就变成了"随手丢"。见需求 §6.6 可见性约束。
+ *
+ * 分组之间**互不重叠**：每条未结束任务恰好出现在一组里，
+ * 避免同一件事在页面上出现两次而让人误以为有两件。
+ */
+export interface OpenTasksView {
+  dayKey: string;
+  /** 已过期且未开始 */
+  overdue: Task[];
+  /** 今天到期且未开始 */
+  dueToday: Task[];
+  /** 已排期到未来、且未开始 */
+  scheduled: Task[];
+  /** 没有截止日期、也没排入今日、且未开始 */
+  unscheduled: Task[];
+  /** 正在推进 */
+  doing: Task[];
+  /** 卡住的（阻塞优先于任何时间维度） */
+  blocked: Task[];
+  total: number;
+  overdueCount: number;
+}
+
+/** 分组顺序固定，界面按此顺序渲染 */
+export const OPEN_TASK_GROUPS = ['overdue', 'dueToday', 'doing', 'blocked', 'scheduled', 'unscheduled'] as const;
+export type OpenTaskGroup = (typeof OPEN_TASK_GROUPS)[number];
+
+export const OPEN_TASK_GROUP_LABELS: Readonly<Record<OpenTaskGroup, string>> = {
+  overdue: '逾期',
+  dueToday: '今天到期',
+  doing: '进行中',
+  blocked: '卡住',
+  scheduled: '已排期（未来）',
+  unscheduled: '没有排期',
+};
+
 export interface TrackingService {
   addProgress(input: {
     target: ProgressTarget;
@@ -50,6 +91,8 @@ export interface TrackingService {
   deleteProgress(id: string): void;
 
   todayView(dayKey?: string): TodayView;
+  /** 全部未结束任务，按可操作性分组（F-09）。任何未结束任务都必须出现在这里 */
+  openTasksView(dayKey?: string): OpenTasksView;
   addToToday(taskId: string, dayKey?: string): Task;
   removeFromToday(taskId: string): Task;
   /** 快速把任务推进到"进行中" */
@@ -198,6 +241,64 @@ export function createTrackingService(database: DatabaseSync): TrackingService {
         blocked,
         inboxCount: countPendingInbox(database),
         counts: { open: open.length, doneToday: doneToday.length },
+      };
+    },
+
+    /**
+     * 全部未结束任务（F-09）。分组互不重叠，判定优先级：
+     *   阻塞 → 进行中 → 逾期 → 今天到期 → 未来排期 → 没有排期
+     * 即"卡住的"和"正在做的"优先于时间维度：一条逾期但正在做的任务，
+     * 应该出现在"进行中"而不是"逾期"里——它已经在处理了。
+     */
+    openTasksView(dayKey) {
+      const key = dayKey ?? keyOf(new Date());
+      const open = listTasksByStatuses(database, OPEN_TASK_STATUSES);
+
+      const blocked: Task[] = [];
+      const doing: Task[] = [];
+      const overdue: Task[] = [];
+      const dueToday: Task[] = [];
+      const scheduled: Task[] = [];
+      const unscheduled: Task[] = [];
+
+      for (const task of open) {
+        if (task.status === 'blocked') {
+          blocked.push(task);
+          continue;
+        }
+        if (task.status === 'doing') {
+          doing.push(task);
+          continue;
+        }
+        // 到这里只剩 todo：按时间维度归类，且每一条恰好落一组
+        if (task.dueDate === null || task.dueDate === key) {
+          // 今天到期（或没有截止日但被手工排入今日）算今天该做的
+          if (task.dueDate === key || task.plannedFor === key) dueToday.push(task);
+          else unscheduled.push(task);
+          continue;
+        }
+        if (task.dueDate < key) {
+          overdue.push(task);
+          continue;
+        }
+        scheduled.push(task);
+      }
+
+      const byDue = (a: Task, b: Task): number => (a.dueDate ?? '9999').localeCompare(b.dueDate ?? '9999');
+      overdue.sort(byDue);
+      dueToday.sort(byDue);
+      scheduled.sort(byDue);
+
+      return {
+        dayKey: key,
+        overdue,
+        dueToday,
+        scheduled,
+        unscheduled,
+        doing,
+        blocked,
+        total: open.length,
+        overdueCount: overdue.length,
       };
     },
 

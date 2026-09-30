@@ -45,6 +45,15 @@ export interface SystemService {
     set(key: string, value: unknown): void;
     list(): { key: string; value: unknown; updatedAt: string }[];
   };
+  /**
+   * 把设置的**当前值**取出来（纯数据）。
+   *
+   * 存在的理由：接口层（HTTP，将来是 IPC）只能传值、不能传函数，
+   * 所以不能让界面去拿 settings 对象再调它的方法——那样序列化后只剩空对象
+   * （实测：`getSettings()` 返回 `{}`，界面报 "settings.list is not a function"）。
+   * 因此这里直接返回数据快照。
+   */
+  getSettings(): { dayBoundaryHour: number; entries: { key: string; value: unknown; updatedAt: string }[] };
   backup(reason: 'startup' | 'manual' | 'daily' | 'weekly'): Promise<BackupFile>;
   listBackups(): BackupFile[];
   /** 按"7 个日快照 + 4 个周快照"轮换，返回删除的文件名 */
@@ -120,14 +129,20 @@ export function createSystemService(database: DatabaseSync, backupDir: string): 
     return files;
   }
 
+  const settings = {
+    dayBoundaryHour: (): number => getDayBoundaryHour(database),
+    setDayBoundaryHour: (hour: number): void => setDayBoundaryHour(database, hour),
+    get: <T>(key: string, fallback: T): T => getSetting(database, key, fallback),
+    set: (key: string, value: unknown): void => setSetting(database, key, value),
+    list: () => listSettings(database),
+  };
+
   return {
-    settings: {
-      dayBoundaryHour: () => getDayBoundaryHour(database),
-      setDayBoundaryHour: (hour) => setDayBoundaryHour(database, hour),
-      get: (key, fallback) => getSetting(database, key, fallback),
-      set: (key, value) => setSetting(database, key, value),
-      list: () => listSettings(database),
-    },
+    settings,
+    getSettings: () => ({
+      dayBoundaryHour: settings.dayBoundaryHour(),
+      entries: settings.list(),
+    }),
 
     async backup(reason) {
       mkdirSync(backupDir, { recursive: true });

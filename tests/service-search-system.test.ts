@@ -13,8 +13,69 @@ import { createSystemService, backupFileName, BACKUP_KEEP_DAILY } from '../src/c
 import { createPlanningService } from '../src/core/service/planningService.ts';
 import { createCaptureService } from '../src/core/service/captureService.ts';
 import { createTrackingService } from '../src/core/service/trackingService.ts';
+import { createJournalService } from '../src/core/service/journalService.ts';
 import { closeDatabase } from '../src/core/db/connection.ts';
 import { ValidationError } from '../src/core/domain/errors.ts';
+
+test('搜索：分类产生的资料条目立刻可搜（F-11 要求搜资料全文）', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    const search = createSearchService(database);
+
+    const { item } = capture.quickCapture({ text: '会议结论：需要补充附件三' });
+    capture.classify(item.id, { kind: 'archive', archiveKind: 'meeting' });
+
+    // 曾经漏接：资料只在 reindexAll() 时才进索引，分类后立刻搜是搜不到的。
+    // 注意结果里还会有原始收件箱条目——快记时它已被索引且仍然存在（有意为之，
+    // 便于按"下周三"这类被剥离的日期片段搜回原始输入），因此这里不假设只有一条。
+    const hits = search.search('附件三');
+    const archiveHit = hits.find((hit) => hit.entityType === 'archive');
+    assert.ok(archiveHit !== undefined, `刚归档的资料必须立刻能搜到，实际命中：${JSON.stringify(hits.map((h) => h.entityType))}`);
+    assert.equal(archiveHit.entityLabel, '资料');
+    assert.equal(archiveHit.alive, true);
+    assert.match(archiveHit.displayTitle, /附件三/);
+  });
+});
+
+test('搜索：日志正文可搜（F-11 要求搜日志全文）', () => {
+  useDb((database) => {
+    const journal = createJournalService(database);
+    const search = createSearchService(database);
+
+    assert.equal(search.search('阻断项').length, 0, '保存前搜不到');
+    journal.save('2026-09-30', '今天的阻断项是等法务确认合同条款');
+
+    const hits = search.search('阻断项');
+    assert.equal(hits.length, 1, '刚保存的日志必须立刻能搜到');
+    assert.equal(hits[0]?.entityType, 'log');
+  });
+});
+
+test('搜索：日志被删除后索引同步清理', () => {
+  useDb((database) => {
+    const journal = createJournalService(database);
+    const search = createSearchService(database);
+
+    journal.save('2026-09-30', '会被删掉的日志内容');
+    assert.equal(search.search('会被删掉').length, 1);
+
+    journal.delete('2026-09-30');
+    assert.equal(search.search('会被删掉').length, 0, '删除日志后不应还能搜到');
+  });
+});
+
+test('搜索：索引失败不影响业务写入（横切关注点不得阻断主流程）', () => {
+  useDb((database) => {
+    const journal = createJournalService(database);
+    // 让索引写入必然失败：把 FTS 虚拟表换成一张形状不对的普通表
+    database.exec('DROP TABLE search_fts');
+    database.exec('CREATE TABLE search_fts (doc_id TEXT)');
+
+    const saved = journal.save('2026-09-30', '索引坏掉时正文仍必须保存成功');
+    assert.equal(saved.body, '索引坏掉时正文仍必须保存成功');
+    assert.equal(journal.get('2026-09-30')?.body, '索引坏掉时正文仍必须保存成功');
+  });
+});
 
 test('搜索：命中任务并回源当前标题', () => {
   useDb((database) => {
