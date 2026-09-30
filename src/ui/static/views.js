@@ -1,4 +1,4 @@
-﻿// 四个页签的渲染逻辑：收件箱 / 今日 / 项目 / 日志。
+// 四个页签的渲染逻辑：收件箱 / 今日 / 项目 / 日志。
 //
 // 这里只做「取数 → 渲染 → 收集输入 → 调接口 → 重绘」，
 // 任何业务判断（能否流转、是否阻塞、汇总口径）都在内核里。
@@ -337,13 +337,103 @@ export async function renderAll(root) {
       class: allMode === 'done' ? 'primary' : '',
       onclick: () => { allMode = 'done'; void reload(); },
     }, '已完成'),
+    // 第三种模式（用户要求）：中止是"事情不做了"，既不该混进"今天做了什么"，
+    // 也不能没有地方查看 —— 否则"我中止过什么"又变成一个看不见的黑洞。
+    el('button', {
+      class: allMode === 'aborted' ? 'primary' : '',
+      onclick: () => { allMode = 'aborted'; void reload(); },
+    }, '已中止'),
   ]);
 
   if (allMode === 'done') {
     await renderCompleted(root, switcher);
     return;
   }
+  if (allMode === 'aborted') {
+    await renderAborted(root, switcher);
+    return;
+  }
   await renderOpen(root, switcher);
+}
+
+/**
+ * 已中止侧：事情不做了的那些。
+ *
+ * 与「已完成」刻意分开 —— 完成是"做成了"，中止是"不做了"，
+ * 混在一起会让"这周做完了什么"这个数字失真。
+ */
+async function renderAborted(root, switcher) {
+  const rangeBar = buildRangeBar(reload);
+
+  let view;
+  try {
+    view = await api.abortedView(completedRange);
+  } catch (error) {
+    mount(root, [
+      el('h2', {}, '任务'),
+      switcher,
+      rangeBar,
+      el('div', { class: 'empty' }, `查询失败：${error.message}`),
+    ]);
+    return;
+  }
+
+  const body = view.groups.length === 0
+    ? el('div', { class: 'empty' }, '这个时间段内没有中止的任务。')
+    : view.groups.map((group) => el('div', {}, [
+      el('h2', { class: 'section-title' }, [
+        group.dayKey, el('span', { class: 'count' }, `${group.entries.length} 条`),
+      ]),
+      el('ul', { class: 'list' }, group.entries.map((entry) => el('li', {}, [
+        el('span', {}, '⊘'),
+        el('div', { class: 'item-body' }, [
+          el('div', { class: 'item-title' }, entry.title),
+          el('div', { class: 'item-meta' }, [
+            entry.projectTitle === null ? null : el('span', { class: 'tag' }, entry.projectTitle),
+            el('span', { class: 'item-raw' }, entry.reason === null ? '未说明原因' : `原因：${entry.reason}`),
+          ]),
+        ]),
+      ]))),
+    ]));
+
+  mount(root, [
+    el('h2', {}, ['已中止 ', el('span', { class: 'count' }, `${view.total} 条`)]),
+    switcher,
+    rangeBar,
+    body,
+  ]);
+}
+
+/** 时间范围选择条（已完成侧与已中止侧共用，口径一致） */
+function buildRangeBar(onChanged) {
+  const custom = { from: el('input', { type: 'date' }), to: el('input', { type: 'date' }) };
+  return el('div', { class: 'toolbar' }, [
+    el('span', {}, '时间范围'),
+    ...[
+      ['last7', '最近 7 天'],
+      ['all', '全部'],
+      ['custom', '自定义'],
+    ].map(([preset, label]) => el('button', {
+      class: completedRange.preset === preset ? 'primary' : '',
+      onclick: () => {
+        completedRange = preset === 'custom'
+          ? { preset, fromDayKey: custom.from.value || undefined, toDayKey: custom.to.value || undefined }
+          : { preset };
+        void onChanged();
+      },
+    }, label)),
+    completedRange.preset === 'custom' ? custom.from : null,
+    completedRange.preset === 'custom' ? el('span', {}, '至') : null,
+    completedRange.preset === 'custom' ? custom.to : null,
+    completedRange.preset === 'custom'
+      ? el('button', {
+        onclick: () => {
+          completedRange = { preset: 'custom', fromDayKey: custom.from.value, toDayKey: custom.to.value };
+          void onChanged();
+        },
+      }, '查询')
+      : null,
+  ]);
 }
 
 async function renderOpen(root, switcher) {
@@ -401,34 +491,7 @@ async function renderOpen(root, switcher) {
  * 选「最近 7 天」→ 一眼扫完 → 照着写。
  */
 async function renderCompleted(root, switcher) {
-  const custom = { from: el('input', { type: 'date' }), to: el('input', { type: 'date' }) };
-  const rangeBar = el('div', { class: 'toolbar' }, [
-    el('span', {}, '时间范围'),
-    ...[
-      ['last7', '最近 7 天'],
-      ['all', '全部'],
-      ['custom', '自定义'],
-    ].map(([preset, label]) => el('button', {
-      class: completedRange.preset === preset ? 'primary' : '',
-      onclick: () => {
-        completedRange = preset === 'custom'
-          ? { preset, fromDayKey: custom.from.value || undefined, toDayKey: custom.to.value || undefined }
-          : { preset };
-        void reload();
-      },
-    }, label)),
-    completedRange.preset === 'custom' ? custom.from : null,
-    completedRange.preset === 'custom' ? el('span', {}, '至') : null,
-    completedRange.preset === 'custom' ? custom.to : null,
-    completedRange.preset === 'custom'
-      ? el('button', {
-        onclick: () => {
-          completedRange = { preset: 'custom', fromDayKey: custom.from.value, toDayKey: custom.to.value };
-          void reload();
-        },
-      }, '查询')
-      : null,
-  ]);
+  const rangeBar = buildRangeBar(reload);
 
   let view;
   try {
@@ -509,7 +572,7 @@ function buildTaskRow(task, dayKey, extraTag, onChanged) {
     el('option', { value: 'progress' }, '进展'),
     el('option', { value: 'blocker' }, '卡点'),
     el('option', { value: 'decision' }, '决定'),
-    el('option', { value: 'waiting' }, '等待'),
+              el('option', { value: 'abort' }, '中止'),
   ]);
 
   noteInput.addEventListener('keydown', (event) => {
@@ -1011,7 +1074,7 @@ export async function renderFocusBar(root, onChanged) {
     el('option', { value: 'progress' }, '进展'),
     el('option', { value: 'blocker' }, '卡点'),
     el('option', { value: 'decision' }, '决定'),
-    el('option', { value: 'waiting' }, '等待'),
+              el('option', { value: 'abort' }, '中止'),
   ]);
   const noteInput = el('input', { type: 'text', placeholder: '刚才这件事有什么进展？（Enter 提交）' });
 

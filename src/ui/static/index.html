@@ -22,7 +22,7 @@
       <input type="search" id="search" placeholder="搜索（中文子串可用）" autocomplete="off">
       <!-- 回收站入口（F-21b）：右上角带数量。
            带数字是因为"里面攒着东西却不显示"等于又造一个看不见的黑洞。 -->
-      <button id="open-trash" title="回收站：已删除（30 天后清理）与已丢弃（不过期）">
+      <button id="open-trash" title="回收站：已忽略的内容（不过期，可放回待处理）">
         回收站<span class="badge zero" id="trash-count">0</span>
       </button>
       <button id="quick-capture" title="打开快记窗">＋ 快记</button>
@@ -38,6 +38,6 @@
 
   <!-- 带版本参数：换了版本号浏览器就会重新拉取，即使此前缓存过。
        服务端同时发送 no-cache，两者叠加确保改完前端必定生效。 -->
-  <script type="module" src="/app.js?v=0.6.0"></script>
+  <script type="module" src="/app.js?v=0.7.0"></script>
 </body>
 </html>

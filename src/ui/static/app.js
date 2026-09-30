@@ -65,7 +65,7 @@ async function refreshBadges() {
   // 回收站入口带数量：里面攒着东西却不显示，等于又造了一个"看不见的黑洞"
   try {
     const overview = await api.trashOverview();
-    const total = overview.counts.deleted + overview.counts.discarded;
+    const total = overview.counts.deleted + overview.counts.ignored;
     trashCount.textContent = String(total);
     trashCount.classList.toggle('zero', total === 0);
   } catch {

@@ -353,7 +353,7 @@ test('焦点候选：跨日后不再标出旧焦点（与 focus() 口径一致�
   });
 });
 
-test('中止：不填原因也能中止，记录与历史进展保留', () => {
+test('中止：记录与历史进展都保留，且中止本身也留痕', () => {
   useDb((database) => {
     const planning = createPlanningService(database);
     const tracking = createTrackingService(database);
@@ -362,13 +362,17 @@ test('中止：不填原因也能中止，记录与历史进展保留', () => {
 
     const aborted = tracking.abortTask(task.id);
     assert.equal(aborted.status, 'cancelled');
-    // 关键：中止不是删除，历史进展必须还在
-    assert.equal(tracking.taskTimeline(task.id).length, 1);
+    const timeline = tracking.taskTimeline(task.id);
+    // 两条：原来的进展 + 中止本身留下的记录。
+    // 中止**总是**留痕（哪怕没填原因），否则日报里看不出这条是被中止的。
+    assert.equal(timeline.length, 2);
+    assert.equal(timeline.filter((e) => e.kind === 'abort').length, 1);
+    assert.equal(timeline.find((e) => e.kind === 'progress')?.body, '做了一半', '历史进展必须还在');
     assert.equal(getTask(database, task.id)?.deletedAt, null, '中止不是删除');
   });
 });
 
-test('中止：填了原因会留一条进展记录（可选项）', () => {
+test('中止：填了原因会留一条 abort 类型的进展记录（可选项）', () => {
   useDb((database) => {
     const planning = createPlanningService(database);
     const tracking = createTrackingService(database);
@@ -378,19 +382,165 @@ test('中止：填了原因会留一条进展记录（可选项）', () => {
     const timeline = tracking.taskTimeline(task.id);
     assert.equal(timeline.length, 1);
     assert.equal(timeline[0]?.body, '需求取消了');
-    assert.equal(timeline[0]?.kind, 'decision');
+    // 用独立的 abort 类型，而不是借用 decision ——
+    // 这样日报的时间线里能一眼看出"这条是中止记录"
+    assert.equal(timeline[0]?.kind, 'abort');
   });
 });
 
-test('中止：原因只填空白等于没填，不产生空记录', () => {
+test('中止：不填原因也会留一条记录（保证日报里能看出中止过）', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const task = planning.createTask({ title: '任务' });
+
+    tracking.abortTask(task.id);
+    const timeline = tracking.taskTimeline(task.id);
+    assert.equal(timeline.length, 1, '无原因也必须留痕，否则日报里看不出中止过');
+    assert.equal(timeline[0]?.kind, 'abort');
+  });
+});
+
+test('已中止总览：按中止日分组，带项目名与原因', () => {
+  useDbWithCalendarDay((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const project = planning.createProject({ title: '某项目' });
+    const a = planning.createTask({ title: '中止甲', projectId: project.id });
+    const b = planning.createTask({ title: '中止乙' });
+    tracking.abortTask(a.id, '需求取消了');
+    tracking.abortTask(b.id); // 不填原因
+
+    const view = tracking.abortedView({ preset: 'last7' });
+    assert.equal(view.total, 2);
+    const all = view.groups.flatMap((g) => g.entries);
+    assert.equal(all.find((e) => e.title === '中止甲')?.reason, '需求取消了');
+    assert.equal(all.find((e) => e.title === '中止甲')?.projectTitle, '某项目');
+    // 不填原因时用固定说明兜底，日报里仍看得出"中止且未说明原因"
+    assert.equal(all.find((e) => e.title === '中止乙')?.reason, '未说明原因');
+    assert.equal(view.groups[0]?.dayKey, dayKeyNow(database), '按中止当天分组');
+  });
+});
+
+test('已中止总览：判据是 abort 进展记录，不是任务状态（避免把无关任务算进来）', () => {
+  useDbWithCalendarDay((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+
+    // 一条被取消但**没有** abort 记录的任务：模拟历史/异常数据。
+    // 早期实现用 status='cancelled' + updated_at 区间判断，会把这类任务算进来，
+    // 而且 updated_at 会被改标题、改截止日等任何改动刷新 —— 所以改用进展记录判定。
+    const legacy = planning.createTask({ title: '被取消但没有中止记录' });
+    planning.setTaskStatus(legacy.id, 'cancelled');
+
+    const real = planning.createTask({ title: '真的中止了' });
+    tracking.abortTask(real.id, '不做了');
+
+    const view = tracking.abortedView({ preset: 'last7' });
+    const titles = view.groups.flatMap((g) => g.entries).map((e) => e.title);
+    assert.deepEqual(titles, ['真的中止了'], '只列确实执行过中止的（有 abort 记录）');
+    assert.equal(view.total, 1);
+  });
+});
+
+test('已中止总览：时间范围过滤生效', () => {
+  useDbWithCalendarDay((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const today = dayKeyNow(database);
+
+    const old = planning.createTask({ title: '很久前中止的' });
+    tracking.abortTask(old.id, '早就不做了');
+    // 把它的 abort 记录挪到 30 天前
+    database.prepare(`UPDATE progress_entries SET day_key = ? WHERE kind = 'abort'`)
+      .run(addDaysToKey(today, -30));
+
+    const recent = planning.createTask({ title: '今天中止的' });
+    tracking.abortTask(recent.id, '刚决定');
+
+    const last7 = tracking.abortedView({ preset: 'last7' });
+    assert.deepEqual(last7.groups.flatMap((g) => g.entries).map((e) => e.title), ['今天中止的']);
+
+    const all = tracking.abortedView({ preset: 'all' });
+    assert.equal(all.total, 2, '「全部」应包含更早的');
+    assert.equal(all.range.fromDayKey, null);
+  });
+});
+
+test('已中止总览：起止颠倒被拒绝', () => {
+  useDbWithCalendarDay((database) => {
+    const tracking = createTrackingService(database);
+    const today = dayKeyNow(database);
+    assert.throws(
+      () => tracking.abortedView({ preset: 'custom', fromDayKey: today, toDayKey: addDaysToKey(today, -5) }),
+      /起始日期不能晚于结束日期/,
+    );
+  });
+});
+
+test('中止：作为进展分类使用时，同样联动状态（与 abortTask 同一条路径）', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const task = planning.createTask({ title: '任务' });
+
+    const result = tracking.addProgress({
+      target: { kind: 'task', id: task.id },
+      kind: 'abort',
+      body: '这个方向不做了',
+    });
+    assert.equal(result.task?.status, 'cancelled', '选「中止」分类就该把任务转为中止');
+    assert.equal(tracking.taskTimeline(task.id)[0]?.kind, 'abort');
+  });
+});
+
+test('中止：重复记录不会重复流转，但记录仍保留（幂等）', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const task = planning.createTask({ title: '任务' });
+    tracking.abortTask(task.id, '第一次');
+    assert.equal(getTask(database, task.id)?.status, 'cancelled');
+
+    // 已取消的任务不能再写进展（终态守卫），这是既有规则
+    assert.throws(
+      () => tracking.addProgress({ target: { kind: 'task', id: task.id }, kind: 'abort', body: '第二次' }),
+      /cancelled 状态，不能再写入推进记录/,
+    );
+  });
+});
+
+test('中止：原因只填空白时用固定说明，不产生空记录', () => {
   useDb((database) => {
     const planning = createPlanningService(database);
     const tracking = createTrackingService(database);
     const task = planning.createTask({ title: '任务' });
 
     tracking.abortTask(task.id, '   ');
-    assert.equal(tracking.taskTimeline(task.id).length, 0);
+    const timeline = tracking.taskTimeline(task.id);
+    assert.equal(timeline.length, 1);
+    // body 不允许为空，因此用一句固定说明兜底 —— 日报里仍然看得出"中止且未说明原因"
+    assert.equal(timeline[0]?.body, '未说明原因');
     assert.equal(getTask(database, task.id)?.status, 'cancelled');
+  });
+});
+
+test('历史数据：waiting 类型的旧记录仍能读出（它不再是新选项，但不能读不出来）', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const task = planning.createTask({ title: '任务' });
+
+    // 直接写一条旧的 waiting 记录，模拟迁移前留下的数据
+    database.prepare(
+      `INSERT INTO progress_entries (id, task_id, kind, body, day_key, occurred_at, created_at, updated_at)
+       VALUES (?, ?, 'waiting', ?, '2026-09-30', '2026-09-30T01:00:00.000Z', '2026-09-30T01:00:00.000Z', '2026-09-30T01:00:00.000Z')`,
+    ).run('legacy-waiting-1', task.id, '等对方回复');
+
+    const timeline = tracking.taskTimeline(task.id);
+    assert.equal(timeline.length, 1);
+    assert.equal(timeline[0]?.kind, 'waiting', '旧取值必须仍可读（CHECK 里特意保留了它）');
+    assert.equal(timeline[0]?.body, '等对方回复');
   });
 });
 

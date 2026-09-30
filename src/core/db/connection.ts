@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { ConstraintError } from '../domain/errors.ts';
 
 /** 代码期望的结构版本 = 最新迁移序号。新增迁移文件后需同步这里。 */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export const DEFAULT_DB_FILENAME = 'workhelper.db';
 

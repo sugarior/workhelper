@@ -1,4 +1,4 @@
-﻿// 界面与内核之间唯一的通路：调用服务门面的 HTTP 包装。
+// 界面与内核之间唯一的通路：调用服务门面的 HTTP 包装。
 //
 // 关于参数形状（本项目反复踩坑的地方，务必读完）：
 // 内核服务方法的签名不统一——有的收一个选项对象，有的收位置参数，
@@ -91,6 +91,8 @@ export const api = {
   addToToday: (taskId) => call('tracking', 'addToToday', taskId),
   removeFromToday: (taskId) => call('tracking', 'removeFromToday', taskId),
   completedView: (range) => call('tracking', 'completedView', [range]),
+  /** 已中止总览：事情不做了的那些，按中止日分组 */
+  abortedView: (range) => call('tracking', 'abortedView', [range]),
 
   // ---------- 焦点（F-15b / F-15c） ----------
   focus: () => call('tracking', 'focus'),

@@ -19,8 +19,22 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 export const SUBTASK_STATUSES = ['todo', 'done'] as const;
 export type SubtaskStatus = (typeof SUBTASK_STATUSES)[number];
 
-export const PROGRESS_KINDS = ['progress', 'blocker', 'decision', 'waiting'] as const;
+/**
+ * 进展记录的类型。
+ *
+ * `abort`（中止）与 `blocker`（卡点）是仅有的两个**会联动任务状态**的类型：
+ *  · blocker → 任务转为 `blocked`
+ *  · abort   → 任务转为 `cancelled`（不做了，但保留记录与历史进展）
+ *
+ * `waiting`（等待他人）保留在类型里是为了**历史数据**：它仍可能出现于旧记录，
+ * 界面必须能显示它，但**不再作为新记录的选项** —— "等待他人"与"卡点"语义重叠
+ * （都是"这件事卡在外部"），而"中止"此前没有任何入口。用户确认用后者取代它。
+ */
+export const PROGRESS_KINDS = ['progress', 'blocker', 'decision', 'waiting', 'abort'] as const;
 export type ProgressKind = (typeof PROGRESS_KINDS)[number];
+
+/** 界面上可选的新记录类型（不含仅供历史显示的 waiting） */
+export const SELECTABLE_PROGRESS_KINDS = ['progress', 'blocker', 'decision', 'abort'] as const;
 
 export const INBOX_STATUSES = ['pending', 'converted', 'archived'] as const;
 export type InboxStatus = (typeof INBOX_STATUSES)[number];

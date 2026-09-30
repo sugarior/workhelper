@@ -1,4 +1,4 @@
-﻿// 本地 HTTP 服务：给图形界面提供通路（M0 的界面形态）。
+// 本地 HTTP 服务：给图形界面提供通路（M0 的界面形态）。
 //
 // 安全边界（设计 §7.1）：
 //  - 只绑 127.0.0.1，不引入任何外部可达面
@@ -62,7 +62,7 @@ const ALLOWED: Readonly<Record<string, readonly string[]>> = {
   planning: ['listProjects', 'projectTree', 'createProject', 'deleteProject',
     'listTasks', 'createTask', 'completeTask', 'reopenTask', 'updateTask',
     'createSubtask', 'setSubtaskStatus', 'reorder'],
-  tracking: ['addProgress', 'taskTimeline', 'todayView', 'openTasksView', 'completedView', 'addToToday', 'removeFromToday',
+  tracking: ['addProgress', 'taskTimeline', 'todayView', 'openTasksView', 'completedView', 'abortedView', 'addToToday', 'removeFromToday',
     'startTask', 'blockTask', 'unblockTask', 'completeTask', 'abortTask',
     'focus', 'focusTask', 'unfocus', 'noteOnFocus', 'focusCandidates'],
   journal: ['summarize', 'save'],

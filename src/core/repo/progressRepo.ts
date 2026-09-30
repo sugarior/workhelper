@@ -129,6 +129,22 @@ export function listProgressByDay(database: DatabaseSync, dayKey: string): Progr
 }
 
 /**
+ * 按类型取全部进展（时间正序）—— 「已中止」总览用它。
+ *
+ * 为什么按类型查而不是按任务状态查：`abort` 类型的进展记录与任务状态
+ * 在同一次操作里写入，它是"确实执行过中止"的权威标记，并且带**归属日键**；
+ * 而任务表没有"中止时间"字段，`updated_at` 会被任何改动刷新。
+ */
+export function listProgressByKind(database: DatabaseSync, kind: ProgressKind): ProgressEntry[] {
+  const rows = queryAll<ProgressRow>(
+    database,
+    `SELECT * FROM ${TABLE} WHERE kind = ? AND deleted_at IS NULL ORDER BY occurred_at ASC, created_at ASC`,
+    kind,
+  );
+  return rows.map(toEntry);
+}
+
+/**
  * 带上下文（项目 › 任务 › 子任务 名字）的当日进展。
  *
  * 为什么需要它（需求 R13 / F-20）：`progress_entries` 只存三个外键，**没有名字**，

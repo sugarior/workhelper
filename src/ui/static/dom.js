@@ -105,4 +105,12 @@ export async function withBusy(button, action) {
 }
 
 export const STATUS_MARK = { todo: '☐', doing: '◐', blocked: '⛔', done: '☑', cancelled: '⊘' };
-export const PROGRESS_LABEL = { progress: '进展', blocker: '卡点', decision: '决定', waiting: '等待' };
+export const PROGRESS_LABEL = {
+  progress: '进展',
+  blocker: '卡点',
+  decision: '决定',
+  // waiting 保留给历史记录：它不再是新记录的选项（与"卡点"语义重叠），
+  // 但旧数据里仍有，显示时必须认得
+  waiting: '等待',
+  abort: '中止',
+};

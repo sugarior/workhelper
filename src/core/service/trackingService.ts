@@ -10,7 +10,7 @@ import { withTx } from '../db/index.ts';
 import {
   applyStatus, clearFocus, countPendingInbox, createProgress, deleteProgress, findFocusedTask,
   getProject, getSubtask, getTask, indexEntity, latestBlockerForTask, listCompletedBetween,
-  listProgressForTarget, listProgressForTaskTree, listSubtasks, listTasks, listTasksByStatuses,
+  listProgressByKind, listProgressForTarget, listProgressForTaskTree, listSubtasks, listTasks, listTasksByStatuses,
   removeEntity, setFocus, setPlannedFor, OPEN_TASK_STATUSES,
 } from '../repo/index.ts';
 import { getDayBoundaryHour } from '../repo/settingsRepo.ts';
@@ -94,6 +94,29 @@ export interface CompletedRange {
 }
 
 /**
+ * 已中止任务的总览（F-09b 的第三种模式）。
+ *
+ * 存在的理由：中止是"事情不做了"，它既不该混进"今天做了什么"（那是完成），
+ * 也不能没有地方查看 —— 否则"我中止过什么"这个问题又变成一个看不见的黑洞。
+ * 与已完成共用时间范围语义，按**中止当天**分组。
+ */
+export interface AbortedEntry {
+  id: string;
+  title: string;
+  projectTitle: string | null;
+  /** 中止时留下的原因（没填则是固定说明） */
+  reason: string | null;
+  /** 归属日键（按日界换算） */
+  dayKey: string;
+}
+
+export interface AbortedView {
+  range: { fromDayKey: string | null; toDayKey: string; preset: CompletedPreset };
+  groups: { dayKey: string; entries: AbortedEntry[] }[];
+  total: number;
+}
+
+/**
  * 已完成总览（F-09b）。
  *
  * 存在的理由：需求 P4 把"复盘是编的"列为核心痛点、G3 承诺"写日报是导出而不是回忆"，
@@ -124,6 +147,8 @@ export interface TrackingService {
   openTasksView(dayKey?: string): OpenTasksView;
   /** 已完成总览（F-09b）。按完成日倒序分组，含任务与子任务 */
   completedView(range: CompletedRange): CompletedView;
+  /** 已中止总览：事情不做了的那些，按中止日分组 */
+  abortedView(range: CompletedRange): AbortedView;
   /** 当前焦点任务（F-15b）。跨日后惰性清空；无焦点返回 null */
   focus(): Task | null;
   /** 聚焦：`todo` 会先转 `doing`；自动顶掉旧焦点。返回新的焦点任务 */
@@ -271,12 +296,18 @@ export function createTrackingService(database: DatabaseSync): TrackingService {
       body,
     });
 
-    // 状态联动：只有卡点会改任务状态
+    // 状态联动：只有"卡点"与"中止"会改任务状态。
+    // 记录先写入、状态后改 —— 顺序不能反：abort 会把任务变成终态，
+    // 之后再写进展会被终态守卫拒绝。
     let task: Task | undefined;
-    if (input.kind === 'blocker' && input.target.kind === 'task') {
+    if (input.target.kind === 'task') {
       const current = getTask(database, input.target.id);
-      if (current !== undefined && current.status !== 'blocked') {
+      if (input.kind === 'blocker' && current !== undefined && current.status !== 'blocked') {
         task = applyTaskStatus(input.target.id, 'blocked', { blockedReason: body });
+      } else if (input.kind === 'abort' && current !== undefined) {
+        // 已取消的任务不再重复流转，但记录仍然保留（幂等）
+        if (current.status !== 'cancelled') task = applyTaskStatus(input.target.id, 'cancelled');
+        else task = current;
       }
     }
     return task === undefined ? { entry } : { entry, task };
@@ -438,6 +469,77 @@ export function createTrackingService(database: DatabaseSync): TrackingService {
           subtasks: entries.filter((entry) => entry.kind === 'subtask').length,
           all: entries.length,
         },
+      };
+    },
+
+    /**
+     * 已中止总览：事情不做了的那些（按中止日分组）。
+     *
+     * **判据是"存在 `abort` 类型的进展记录"，不是任务状态**
+     * （最初我用 `status='cancelled'` + `updated_at` 区间，那是错的）：
+     *  · 任务表没有"中止时间"字段，`updated_at` 会被**任何**改动刷新
+     *    （改标题、改截止日都会），拿它当中止时刻会把无关任务算进来
+     *  · 更重要的是，`abort` 进展记录本身就是"确实执行过中止"的权威标记 ——
+     *    它与任务状态在同一次操作里写入，且带**归属日键**，正是这里要的
+     * 因此查进展记录既准确又直接，不需要再推断。
+     */
+    abortedView(range) {
+      const today = keyOf(new Date());
+      const boundary = boundaryHour();
+
+      let fromDayKey: string | null;
+      if (range.preset === 'all') fromDayKey = null;
+      else if (range.preset === 'last7') fromDayKey = addDaysToKey(today, -6);
+      else fromDayKey = range.fromDayKey ?? today;
+      if (fromDayKey !== null && !DAY_KEY_SHAPE.test(fromDayKey)) {
+        throw new ValidationError(`起始日期格式应为 YYYY-MM-DD，收到：${fromDayKey}`);
+      }
+      const toDayKey = range.preset === 'custom' ? (range.toDayKey ?? today) : today;
+      if (!DAY_KEY_SHAPE.test(toDayKey)) {
+        throw new ValidationError(`结束日期格式应为 YYYY-MM-DD，收到：${toDayKey}`);
+      }
+      if (fromDayKey !== null && fromDayKey > toDayKey) {
+        throw new ValidationError(`起始日期不能晚于结束日期：${fromDayKey} > ${toDayKey}`);
+      }
+
+      const entries: AbortedEntry[] = [];
+      const seen = new Set<string>();
+      for (const entry of listProgressByKind(database, 'abort')) {
+        const taskId = entry.taskId;
+        // 只列任务级的；同一任务重复中止只显示最近一条（进展按时间正序，后面的覆盖前面）
+        if (taskId === null || (fromDayKey !== null && entry.dayKey < fromDayKey) || entry.dayKey > toDayKey) continue;
+        const task = getTask(database, taskId);
+        if (task === undefined) continue;
+
+        const item: AbortedEntry = {
+          id: task.id,
+          title: task.title,
+          projectTitle: task.projectId === null ? null : getProject(database, task.projectId)?.title ?? null,
+          reason: entry.body,
+          dayKey: entry.dayKey,
+        };
+        if (seen.has(taskId)) {
+          const index = entries.findIndex((x) => x.id === taskId);
+          if (index >= 0) entries[index] = item;
+        } else {
+          seen.add(taskId);
+          entries.push(item);
+        }
+      }
+
+      const grouped = new Map<string, AbortedEntry[]>();
+      for (const entry of entries) {
+        const list = grouped.get(entry.dayKey);
+        if (list === undefined) grouped.set(entry.dayKey, [entry]);
+        else list.push(entry);
+      }
+
+      return {
+        range: { fromDayKey, toDayKey, preset: range.preset },
+        groups: [...grouped.entries()]
+          .map(([dayKey, list]) => ({ dayKey, entries: list }))
+          .sort((a, b) => b.dayKey.localeCompare(a.dayKey)),
+        total: entries.length,
       };
     },
 
@@ -623,14 +725,20 @@ export function createTrackingService(database: DatabaseSync): TrackingService {
      *
      * 原因可选：填了就先留一条进展记录再改状态 —— **顺序很重要**，
      * 因为任务变成 `cancelled` 之后就是终态，再写进展会被终态守卫拒绝。
+     *
+     * 现在走 `addProgressCore({ kind: 'abort' })`，与「记一笔」里选"中止"是**同一条路径**：
+     * 那个分类本身就会把任务转为 cancelled（见 addProgressCore 的联动说明）。
      */
     abortTask(taskId, reason) {
       return withTx(database, () => {
         const text = reason?.trim() ?? '';
-        if (text.length > 0) {
-          addProgressCore({ target: { kind: 'task', id: taskId }, kind: 'decision', body: text });
-        }
-        return applyTaskStatus(taskId, 'cancelled');
+        const result = addProgressCore({
+          target: { kind: 'task', id: taskId },
+          // 没填原因时用一句固定说明，保证进展记录非空（body 不允许为空）
+          kind: 'abort',
+          body: text.length > 0 ? text : '未说明原因',
+        });
+        return result.task ?? getTask(database, taskId)!;
       });
     },
 
