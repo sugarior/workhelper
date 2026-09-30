@@ -122,7 +122,7 @@ function confirmAsProject(title) {
     `把「${title}」变成一个新项目？\n\n` +
     '· 项目名就用这行文字\n' +
     '· 不会自动生成任务 —— 之后在「项目」页里逐步拆解\n' +
-    '· 选错了可以点「更多 ▾ → 撤销上一次分类」还原',
+    '· 选错了可以点收件箱工具栏上的「撤销」还原',
   );
 }
 
@@ -178,7 +178,7 @@ export async function renderInbox(root) {
       `${what}\n\n` +
       '· 每条的原文就是项目名\n' +
       '· 不会自动生成任务 —— 之后在「项目」页里逐步拆解\n' +
-      '· 选错了可以点「更多 ▾ → 撤销上一次分类」还原',
+      '· 选错了可以点收件箱工具栏上的「撤销」还原',
     )) return;
 
     await withBusy(button, async () => {
@@ -225,22 +225,20 @@ export async function renderInbox(root) {
       title: '我不要这条 —— 从收件箱移走，之后可在回收站放回',
       onclick: (event) => void ignoreSelected(event.target),
     }, '忽略'),
-    moreMenu([
-      {
-        label: '转项目',
-        hint: '这一条本身就是一件事，之后在项目页里拆解',
-        run: (button) => classifyAsProject(button),
-      },
-      {
-        label: '撤销上一次操作',
-        hint: '把上一次转出的东西还原回收件箱',
-        run: (button) => withBusy(button, async () => {
-          const done = await api.undoLastClassification();
-          flash(done ? '已撤销上一次分类' : '没有可撤销的操作', done ? 'ok' : 'error');
-          await reload();
-        }),
-      },
-    ]),
+    // 「转项目」也放第一层：菜单里只剩它一项，多一次点击没有收益。
+    // 与行内的处理保持一致 —— 同一组动作在两处不该有不同的层级。
+    el('button', {
+      title: '把勾选的条目各变成一个项目（或单选时那一条）',
+      onclick: (event) => void classifyAsProject(event.target),
+    }, '转项目'),
+    el('button', {
+      title: '撤销上一次转出或忽略',
+      onclick: (event) => void withBusy(event.target, async () => {
+        const done = await api.undoLastClassification();
+        flash(done ? '已撤销上一次操作' : '没有可撤销的操作', done ? 'ok' : 'error');
+        await reload();
+      }),
+    }, '撤销'),
   ]);
 
   const rows = items.map((item) => {
@@ -287,18 +285,19 @@ export async function renderInbox(root) {
             await reload();
           }),
         }, '忽略'),
-        moreMenu([
-          {
-            label: '转项目',
-            hint: '这一条本身就是一件事',
-            run: (button) => withBusy(button, async () => {
-              if (!confirmAsProject(item.body)) return;
-              await api.classify(item.id, { kind: 'project' });
-              flash('已建项目，去「项目」页拆解');
-              await reload();
-            }),
-          },
-        ]),
+        // 直接放在第一层，不再收进「更多 ▾」：
+        // 那个菜单里只剩这一项，多一次点击没有任何收益。
+        // 原来的说明文字（"这一条本身就是一件事"）改由确认框承担，
+        // 因此信息没有丢，只是从常驻提示变成"点下去才说明"。
+        el('button', {
+          title: '这一条本身就是一件事（不会自动生成任务）',
+          onclick: (event) => void withBusy(event.target, async () => {
+            if (!confirmAsProject(item.body)) return;
+            await api.classify(item.id, { kind: 'project' });
+            flash('已建项目，去「项目」页拆解');
+            await reload();
+          }),
+        }, '转项目'),
       ]),
     ]);
   });
