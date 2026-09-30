@@ -4,7 +4,7 @@
 import { api } from '/api.js';
 import { el, mount, shortId, flash } from '/dom.js';
 import {
-  renderInbox, renderAll, renderToday, renderProjects, renderLog, renderTrash,
+  renderInbox, renderAll, renderToday, renderProjects, renderLog, renderTrash, renderMaterials,
   renderFocusBar, focusNoteInput, setRefreshHook,
 } from '/views.js';
 
@@ -21,6 +21,7 @@ const RENDERERS = {
   inbox: renderInbox,
   all: renderAll,
   today: renderToday,
+  materials: renderMaterials,
   projects: renderProjects,
   log: renderLog,
   // 回收站不是页签而是右上角入口（需求 F-21b：低频、偏系统，不占主导航）。

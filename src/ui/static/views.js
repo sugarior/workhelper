@@ -164,6 +164,53 @@ export async function renderInbox(root) {
     });
   }
 
+  /**
+   * 存为资料（需求 F-12）。
+   *
+   * **必须先选目标**（规则 M2）—— 绝不自动关联"当前正在做的任务"。
+   * 因此这里先弹目标选择器，选好才提交；取消则什么都不做。
+   *
+   * 用 `classifyMany` 批量提交时，**同一个目标集合会挂到每一条资料上**：
+   * 多选时逐条选目标太累，而"这几条都属于同一件事"正是多选的语义。
+   */
+  async function classifyAsMaterial(button) {
+    const ids = selected.size > 0 ? [...selected] : [];
+    if (ids.length === 0) {
+      flash('请先勾选要处理的条目', 'error');
+      return;
+    }
+
+    // 预览"这条会变成什么"：识别到几个可打开的入口、几行会成为文字入口。
+    // 这段信息正是需求 §4.2 D4 要的"粘贴后能确认识别结果"。
+    let entryCount = null;
+    let textCount = 0;
+    if (ids.length === 1) {
+      const body = items.find((item) => item.id === ids[0])?.body ?? '';
+      const preview = await api.quickCapture({ text: body, kindHint: 'note', dryRun: true });
+      entryCount = preview.entries.length;
+      textCount = preview.entries.filter((entry) => entry.kind === 'text').length;
+    }
+
+    const targets = await pickTargets(
+      ids.length === 1 ? '这条资料挂靠到哪？' : `这 ${ids.length} 条资料都挂靠到哪？`,
+      entryCount === null
+        ? '资料必须挂靠到至少一个任务或项目 —— 不挂靠就会变成没人管的堆积'
+        : `识别到 ${entryCount - textCount} 个可打开的入口${textCount === 0 ? '' : `，另有 ${textCount} 行会成为文字入口`}`,
+    );
+    if (targets === null) return; // 取消
+    if (targets.length === 0) {
+      flash('至少要选一个任务或项目', 'error');
+      return;
+    }
+
+    await withBusy(button, async () => {
+      if (ids.length === 1) await api.classify(ids[0], { kind: 'archive', links: targets });
+      else await api.classifyMany(ids, { kind: 'archive', links: targets });
+      flash(ids.length === 1 ? '已存为资料' : `已存 ${ids.length} 条资料`);
+      await reload();
+    });
+  }
+
   /** 批量转项目：多选时逐条确认太累，用一次确认说明会影响几条 */
   async function classifyAsProject(button) {
     const ids = selected.size > 0 ? [...selected] : [];
@@ -218,7 +265,8 @@ export async function renderInbox(root) {
     projectPicker,
     el('button', { onclick: (event) => void classifySelected(taskTarget(), event.target) }, '转任务'),
     el('button', {
-      onclick: (event) => void classifySelected({ kind: 'archive', archiveKind: 'note' }, event.target),
+      title: '存为资料 —— 会先问挂靠到哪个任务或项目',
+      onclick: (event) => void classifyAsMaterial(event.target),
     }, '存为资料'),
     el('button', {
       class: 'danger',
@@ -270,8 +318,15 @@ export async function renderInbox(root) {
           }),
         }, '转任务'),
         el('button', {
+          title: '存为资料 —— 会先问挂靠到哪个任务或项目',
           onclick: (event) => void withBusy(event.target, async () => {
-            await api.classify(item.id, { kind: 'archive', archiveKind: 'note' });
+            // 与工具栏的「存为资料」走同一条路径：先选目标，选好才提交（规则 M2）
+            const targets = await pickTargets(
+              '这条资料挂靠到哪？',
+              '资料必须挂靠到至少一个任务或项目 —— 不挂靠就会变成没人管的堆积',
+            );
+            if (targets === null || targets.length === 0) return;
+            await api.classify(item.id, { kind: 'archive', archiveKind: 'note', links: targets });
             flash('已存为资料');
             await reload();
           }),
@@ -1003,6 +1058,8 @@ async function renderProjectTree(root, projectId) {
             await reload();
           }) }, '完成'),
       ]),
+      // 资料折叠行（F-14）：任务上不因资料多而变长，因此默认折叠
+      materialFoldRow('task', task.id),
       subtasks,
       timelineBox,
     ]);
@@ -1019,6 +1076,8 @@ async function renderProjectTree(root, projectId) {
     ]),
     el('h2', {}, [tree.project.title, ' ', el('span', { class: 'count' }, `${done}/${total} 任务`)]),
     tree.project.goal !== null ? el('div', { class: 'item-raw' }, `目标：${tree.project.goal}`) : null,
+    // 项目自己也能挂资料（F-12：资料可挂靠任务**或**项目）
+    materialFoldRow('project', projectId),
     addTaskRow,
     nodes.length > 0 ? el('div', {}, nodes) : el('div', { class: 'empty' }, '这个项目还没有任务。'),
   ]);
@@ -1389,3 +1448,310 @@ export async function renderLog(root) {
 
   await loadDay(dayKey);
 }
+
+// ============================================================
+// 资料（F-11 ~ F-14）
+// ============================================================
+
+/** 入口形态的中文名。`text` 与前三者并列，但它**不能打开** */
+const ENTRY_KIND_LABEL = { dir: '目录', file: '文件', url: '网址', text: '文字' };
+
+/**
+ * 目标选择器（需求 F-12 规则 M2 的落点）。
+ *
+ * 为什么必须弹窗、不能"一点就存"：资料必须挂靠（M1），而**绝不能自动关联
+ * "当前正在做的任务"** —— 挂错目标的犯错成本（之后找不到）远高于多选一次。
+ *
+ * 用居中遮罩而不是 `makeFloating`：内容是可滚动的树，需要固定高度和自己的
+ * 滚动容器，而浮层是"贴着某个按钮"的定位模型，两者不合适。
+ *
+ * @returns 选中的目标数组；**取消时返回 null**（与"选了 0 个"区分开）
+ */
+function pickTargets(title, hint) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+      resolve(value);
+    };
+    const onKey = (event) => {
+      if (event.key === 'Escape') finish(null);
+    };
+
+    const chosen = new Set();
+    const listBox = el('div', { class: 'picker-list' }, el('div', { class: 'empty' }, '载入中…'));
+    const confirmButton = el('button', { class: 'primary', disabled: true }, '确认');
+    const updateConfirm = () => {
+      confirmButton.disabled = chosen.size === 0;
+      confirmButton.textContent = chosen.size === 0 ? '确认' : `挂靠到 ${chosen.size} 个目标`;
+    };
+
+    const row = (type, id, label, depth) => el('label', {
+      class: 'picker-row',
+      style: `padding-left: ${10 + depth * 18}px`,
+    }, [
+      el('input', {
+        type: 'checkbox',
+        onchange: (event) => {
+          if (event.target.checked) chosen.add(`${type}:${id}`);
+          else chosen.delete(`${type}:${id}`);
+          updateConfirm();
+        },
+      }),
+      el('span', { class: 'tag' }, type === 'project' ? '项目' : '任务'),
+      el('span', { class: 'picker-label' }, label),
+    ]);
+
+    void (async () => {
+      try {
+        const [projects, tasks] = await Promise.all([api.listProjects(), api.listTasks({})]);
+        const rows = [];
+        const byProject = new Map();
+        for (const task of tasks) {
+          const key = task.projectId ?? '';
+          if (!byProject.has(key)) byProject.set(key, []);
+          byProject.get(key).push(task);
+        }
+        for (const project of projects) {
+          rows.push(row('project', project.id, project.title, 0));
+          for (const task of byProject.get(project.id) ?? []) rows.push(row('task', task.id, task.title, 1));
+        }
+        const loose = byProject.get('') ?? [];
+        if (loose.length > 0) {
+          rows.push(el('div', { class: 'picker-group' }, '没有项目的任务'));
+          for (const task of loose) rows.push(row('task', task.id, task.title, 1));
+        }
+        mount(listBox, rows.length === 0
+          ? el('div', { class: 'empty' }, '还没有任何项目或任务 —— 先建一个，资料才有地方挂。')
+          : rows);
+      } catch (error) {
+        mount(listBox, el('div', { class: 'empty' }, `载入失败：${error.message}`));
+      }
+    })();
+
+    const overlay = el('div', { class: 'picker-overlay' }, el('div', { class: 'picker' }, [
+      el('div', { class: 'picker-title' }, title),
+      hint === null ? null : el('div', { class: 'picker-hint' }, hint),
+      listBox,
+      el('div', { class: 'picker-actions' }, [
+        el('button', { onclick: () => finish(null) }, '取消'),
+        confirmButton,
+      ]),
+    ]));
+
+    confirmButton.addEventListener('click', () => {
+      finish([...chosen].map((key) => {
+        const [type, id] = key.split(':');
+        return { type, id };
+      }));
+    });
+    // 点遮罩空白处等于取消（符合直觉），点面板内部不取消
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) finish(null);
+    });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+  });
+}
+
+/**
+ * 打开一批指针。浏览器会拦截连续弹窗，因此被拦时必须说清怎么办 ——
+ * 静默失败会让人以为"打开全部"这个功能坏了。
+ */
+function openTargets(targets) {
+  let blocked = 0;
+  for (const target of targets) {
+    const isUrl = /^(https?|ftp):\/\//i.test(target);
+    // 本地路径交给系统默认程序；`file://` 需要把反斜杠换成斜杠
+    const url = isUrl ? target : `file:///${target.replaceAll('\\', '/').replace(/^\/+/, '')}`;
+    if (window.open(url, '_blank') === null) blocked += 1;
+  }
+  if (blocked > 0) {
+    flash(`有 ${blocked} 项被浏览器拦截。请允许本站弹出窗口，或用「复制」逐个打开。`, 'error');
+  }
+}
+
+/** 复制到剪贴板；失败时给一条能用的退路，而不是静默失败 */
+async function copyToClipboard(text, okMessage) {
+  try {
+    await navigator.clipboard.writeText(text);
+    flash(okMessage);
+  } catch {
+    window.prompt('复制失败，请手动复制：', text);
+  }
+}
+
+/**
+ * 一条资料的展示：入口 + 挂靠 + 操作。
+ *
+ * `text` 入口**不能打开**（它指向实物或无法用路径表达的信息），
+ * 因此明确标注为"文字"、只提供复制，并在"打开全部"时跳过它。
+ * 让它看起来像个坏掉的链接，比没有这个功能更糟。
+ */
+function materialRow(material, options, onChanged) {
+  const openable = material.entries.filter((entry) => entry.kind !== 'text');
+
+  const entriesBox = el('div', { class: 'material-entries' }, material.entries.map((entry) => el('div', {
+    class: 'material-entry',
+  }, [
+    el('span', { class: `tag${entry.kind === 'text' ? ' tag-text' : ''}` }, ENTRY_KIND_LABEL[entry.kind]),
+    el('span', { class: 'entry-target' }, entry.target),
+    entry.note === null || entry.note === '' ? null : el('span', { class: 'item-raw' }, entry.note),
+    entry.kind === 'text'
+      ? el('button', {
+        title: '这段文字不能打开，但可以复制',
+        onclick: () => void copyToClipboard(entry.target, '已复制文字'),
+      }, '复制')
+      : el('button', { title: '打开', onclick: () => openTargets([entry.target]) }, '打开'),
+    entry.kind === 'text' ? null : el('button', {
+      title: '复制路径或网址（打不开时的兜底）',
+      onclick: () => void copyToClipboard(entry.target, '已复制'),
+    }, '复制'),
+  ])));
+
+  const body = el('div', { class: 'item-body' }, [
+    el('div', { class: 'item-title' }, material.title === null || material.title === '' ? '（无标题）' : material.title),
+    el('div', { class: 'item-meta' }, [
+      el('span', {}, `📎 ${material.entries.length} 个入口`),
+      openable.length === material.entries.length
+        ? null
+        : el('span', { class: 'item-raw' }, `其中 ${material.entries.length - openable.length} 条是文字`),
+      ...material.links.map((link) => el('span', { class: 'tag' }, `${link.type === 'project' ? '项目' : '任务'}：${link.title}`)),
+    ]),
+    entriesBox,
+  ]);
+
+  const actions = el('div', { class: 'row-actions' }, [
+    openable.length === 0
+      ? el('span', { class: 'item-raw' }, '无可用打开项')
+      : el('button', {
+        title: openable.length > 1
+          ? '逐个打开（浏览器可能拦截连续弹窗，被拦时按提示允许即可）'
+          : '打开',
+        onclick: () => openTargets(openable.map((entry) => entry.target)),
+      }, openable.length > 1 ? `打开全部 ${openable.length}` : '打开'),
+    el('button', {
+      title: '改挂靠目标（至少保留一个）',
+      onclick: () => void withBusy(null, async () => {
+        const targets = await pickTargets('改挂靠', '一条资料可挂靠多个任务或项目；至少保留一个');
+        if (targets === null || targets.length === 0) return;
+        await api.updateMaterial(material.id, { targets });
+        flash('已更新挂靠');
+        await onChanged();
+      }),
+    }, '挂靠'),
+    options.compact === true ? null : el('button', {
+      class: 'danger',
+      title: '删除这条资料，入口一并消失',
+      onclick: () => void withBusy(null, async () => {
+        if (!window.confirm(`删除资料「${material.title ?? ''}」？\n\n· 它的入口会一并消失（软删除，可恢复）`)) return;
+        await api.removeMaterial(material.id);
+        flash('已删除');
+        await onChanged();
+      }),
+    }, '删除'),
+  ]);
+
+  return el('li', {}, [body, actions]);
+}
+
+/** 资料页签的当前筛选（页面内保留，切走再回来不跳回默认项） */
+let materialOrphanOnly = false;
+
+/** 资料页（F-14）：按时间倒序，可筛"未挂靠"，可改/追加挂靠 */
+export async function renderMaterials(root) {
+  let materials;
+  try {
+    materials = await api.listMaterials({ orphanOnly: materialOrphanOnly });
+  } catch (error) {
+    mount(root, [
+      el('h2', {}, '资料'),
+      el('div', { class: 'empty' }, `载入失败：${error.message}`),
+    ]);
+    return;
+  }
+
+  // 未挂靠数量单独查一次：筛选按钮上要显示"有多少条等着处理"，
+  // 这正是不让资料退化成垃圾堆的那道工序（需求 §4.1 的动机）
+  const orphans = await api.listMaterials({ orphanOnly: true });
+
+  const reload = async () => { await renderMaterials(root); };
+  const switcher = el('div', { class: 'toolbar' }, [
+    el('button', {
+      class: materialOrphanOnly ? '' : 'primary',
+      onclick: () => { materialOrphanOnly = false; void reload(); },
+    }, `全部（${materials.length}）`),
+    el('button', {
+      class: materialOrphanOnly ? 'primary' : '',
+      title: '没有任何任务/项目挂靠的资料。它们不会自己消失，所以需要这条筛选来暴露出来',
+      onclick: () => { materialOrphanOnly = true; void reload(); },
+    }, `未挂靠（${orphans.length}）`),
+  ]);
+
+  const body = materials.length === 0
+    ? el('div', { class: 'empty' }, materialOrphanOnly
+      ? '没有未挂靠的资料 —— 每条资料都有着落。'
+      : '还没有资料。在收件箱里把带路径/链接的条目「存为资料」，或用速记板粘贴多行。')
+    : el('ul', { class: 'list' }, materials.map((material) => materialRow(material, {}, reload)));
+
+  mount(root, [
+    el('h2', {}, ['资料 ', el('span', { class: 'count' }, `${materials.length} 条`)]),
+    switcher,
+    el('div', { class: 'item-raw' },
+      '资料只存**指针**（路径、网址、或一段指向实物的文字），不存文件本体。每条资料必须挂靠到至少一个任务或项目。'),
+    body,
+  ]);
+}
+
+/**
+ * 任务/项目详情里的资料折叠行（F-14）。
+ *
+ * **折叠是硬要求**：任务详情不能因为资料多而变长。
+ */
+export function materialFoldRow(type, id) {
+  const box = el('div', { class: 'material-fold' });
+  let loaded = false;
+  let expanded = false;
+
+  const render = async () => {
+    if (!loaded) {
+      mount(box, el('div', { class: 'item-raw' }, '载入资料…'));
+      try {
+        box.dataset.materials = JSON.stringify(await api.materialsForTarget(type, id));
+      } catch (error) {
+        mount(box, el('div', { class: 'item-raw' }, `资料载入失败：${error.message}`));
+        return;
+      }
+      loaded = true;
+    }
+    const materials = JSON.parse(box.dataset.materials ?? '[]');
+    if (materials.length === 0) {
+      mount(box, null);
+      return;
+    }
+    if (!expanded) {
+      mount(box, el('button', {
+        class: 'fold-toggle',
+        onclick: () => { expanded = true; void render(); },
+      }, `📎 资料 ${materials.length} 条 ▸`));
+      return;
+    }
+    mount(box, [
+      el('button', {
+        class: 'fold-toggle',
+        onclick: () => { expanded = false; void render(); },
+      }, `📎 资料 ${materials.length} 条 ▾`),
+      el('ul', { class: 'list' }, materials.map((material) => materialRow(material, { compact: true }, async () => {
+        loaded = false;
+        await render();
+      }))),
+    ]);
+  };
+
+  void render();
+  return box;
+}
+

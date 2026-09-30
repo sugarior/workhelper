@@ -308,3 +308,98 @@ body.capture {
 @keyframes collapse {
   to { opacity: 0; transform: translateY(-8px) scale(0.985); }
 }
+
+/* ============================================================
+   资料（F-11 ~ F-14）
+   ============================================================ */
+
+/* 目标选择器：居中遮罩 + 可滚动列表。
+   用遮罩而不是浮层：内容是一棵树，需要固定高度和自己的滚动容器。 */
+.picker-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+.picker {
+  background: var(--panel, #fff);
+  border-radius: 10px;
+  padding: 16px 18px;
+  width: min(520px, 92vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+}
+.picker-title { font-size: 15px; font-weight: 600; }
+.picker-hint { font-size: 12px; opacity: 0.7; }
+.picker-list {
+  overflow-y: auto;
+  border: 1px solid var(--line, #ddd);
+  border-radius: 6px;
+  padding: 4px 0;
+  min-height: 120px;
+  flex: 1;
+}
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.picker-row:hover { background: rgba(127, 127, 127, 0.1); }
+.picker-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-group {
+  font-size: 12px;
+  opacity: 0.65;
+  padding: 8px 10px 3px;
+  border-top: 1px solid var(--line, #ddd);
+  margin-top: 4px;
+}
+.picker-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* 资料行里的入口列表 */
+.material-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 5px;
+}
+.material-entry {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  min-width: 0;
+}
+/* 路径可能很长：让它自己滚动而不是把整行撑破 */
+.entry-target {
+  font-family: ui-monospace, Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.material-entry button { padding: 2px 7px; font-size: 11px; }
+
+/* 文字入口：明确标注它不是可打开之物，避免看起来像坏掉的链接 */
+.tag-text { opacity: 0.75; font-style: italic; }
+
+/* 任务/项目详情里的资料折叠行（折叠是硬要求：详情不能因资料多而变长） */
+.material-fold { margin: 4px 0; }
+.fold-toggle {
+  background: none;
+  border: none;
+  padding: 2px 0;
+  font-size: 12px;
+  opacity: 0.8;
+  cursor: pointer;
+}
+.fold-toggle:hover { opacity: 1; text-decoration: underline; }
