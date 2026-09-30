@@ -230,6 +230,80 @@ test('记一笔：记"卡点"会联动状态并顺带清掉焦点（与任务行
   });
 });
 
+test('焦点候选：列出进行中与待办，卡住/完成的不列', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const project = planning.createProject({ title: '某项目' });
+
+    const doing = planning.createTask({ title: '在做的', projectId: project.id });
+    const todo = planning.createTask({ title: '还没开始的' });
+    const blocked = planning.createTask({ title: '卡住的' });
+    const done = planning.createTask({ title: '完成的' });
+    planning.setTaskStatus(doing.id, 'doing');
+    planning.setTaskStatus(blocked.id, 'doing');
+    planning.setTaskStatus(blocked.id, 'blocked', { blockedReason: '等回复' });
+    tracking.completeTask(done.id);
+
+    const list = tracking.focusCandidates();
+    assert.deepEqual(list.map((c) => c.title), ['在做的', '还没开始的'], '进行中排在待办前，且只列这两类');
+    // todo 也列出来是有意的：聚焦它会自动开始，若只列 doing 用户会"没得选"
+    assert.deepEqual(list.map((c) => c.status), ['doing', 'todo']);
+    assert.equal(list[0]?.projectTitle, '某项目', '带上项目名便于区分同名任务');
+    assert.equal(list.every((c) => c.isFocused === false), true);
+  });
+});
+
+test('焦点候选：当前焦点排在最前（打开切换器先看到"我现在这条"）', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    planning.createTask({ title: '甲' });
+    planning.createTask({ title: '乙' });
+    const target = planning.createTask({ title: '丙' });
+    const other = planning.createTask({ title: '丁' });
+    planning.setTaskStatus(other.id, 'doing'); // 先进进行中，但焦点在丙
+    tracking.focusTask(target.id);
+
+    const list = tracking.focusCandidates();
+    assert.equal(list[0]?.title, '丙', '焦点必须排第一');
+    assert.equal(list[0]?.isFocused, true);
+    // 其余：进行中的丁排在待办的甲/乙之前
+    assert.equal(list[1]?.title, '丁');
+    assert.deepEqual(list.slice(2).map((c) => c.status), ['todo', 'todo']);
+  });
+});
+
+test('焦点候选：标出哪一条是当前焦点', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const a = planning.createTask({ title: '甲' });
+    planning.createTask({ title: '乙' });
+    tracking.focusTask(a.id);
+
+    const list = tracking.focusCandidates();
+    assert.equal(list.find((c) => c.title === '甲')?.isFocused, true);
+    assert.equal(list.find((c) => c.title === '乙')?.isFocused, false);
+  });
+});
+
+test('焦点候选：跨日后不再标出旧焦点（与 focus() 口径一致）', () => {
+  useDbWithCalendarDay((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const task = planning.createTask({ title: '昨天聚焦的' });
+    tracking.focusTask(task.id);
+
+    database.prepare('UPDATE tasks SET focused_day_key = ? WHERE id = ?')
+      .run(addDaysToKey(dayKeyNow(database), -1), task.id);
+
+    assert.equal(tracking.focus(), null, 'focus() 应视为无焦点');
+    const list = tracking.focusCandidates();
+    assert.equal(list.find((c) => c.id === task.id)?.isFocused, false, '候选列表口径必须一致');
+  });
+});
+
 test('焦点：日界为 0 点时，跨日判断跟着走', () => {
   useDb((database) => {
     const planning = createPlanningService(database);

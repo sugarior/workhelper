@@ -9,7 +9,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { withTx } from '../db/index.ts';
 import {
   applyStatus, clearFocus, countPendingInbox, createProgress, deleteProgress, findFocusedTask,
-  getSubtask, getTask, indexEntity, latestBlockerForTask, listCompletedBetween,
+  getProject, getSubtask, getTask, indexEntity, latestBlockerForTask, listCompletedBetween,
   listProgressForTarget, listProgressForTaskTree, listSubtasks, listTasks, listTasksByStatuses,
   removeEntity, setFocus, setPlannedFor, OPEN_TASK_STATUSES,
 } from '../repo/index.ts';
@@ -21,7 +21,7 @@ import {
 } from '../domain/rules.ts';
 import { InvalidTransitionError, ValidationError } from '../domain/errors.ts';
 import type { CompletedEntry } from '../repo/completedRepo.ts';
-import type { ProgressEntry, ProgressKind, ProgressTarget, Task } from '../domain/types.ts';
+import type { ProgressEntry, ProgressKind, ProgressTarget, Task, TaskStatus } from '../domain/types.ts';
 
 /** 日键形状校验：completedView 的自定义范围用它挡住脏输入 */
 const DAY_KEY_SHAPE = /^\d{4}-\d{2}-\d{2}$/;
@@ -130,6 +130,15 @@ export interface TrackingService {
   focusTask(taskId: string): Task;
   /** 取消聚焦 */
   unfocus(): void;
+  /**
+   * 可以聚焦的任务（F-15b 的切换器用）。
+   *
+   * 包含 `doing` 与 `todo`：`todo` 也列出来是有意的 ——
+   * 对 `todo` 聚焦会自动先转 `doing`（聚焦与开始本来就是同一个动作），
+   * 若只列 `doing`，用户想切到一条尚未开始的任务时会发现"没得选"。
+   * 界面据此把 `todo` 标成"选中即开始"。
+   */
+  focusCandidates(): { id: string; title: string; status: TaskStatus; projectTitle: string | null; isFocused: boolean }[];
   /**
    * 「记一笔」：给当前焦点任务追加一条进展（F-15c）。
    * 没有焦点时抛错 —— 让"记到哪"永远有明确答案，而不是猜一个目标。
@@ -464,6 +473,32 @@ export function createTrackingService(database: DatabaseSync): TrackingService {
       withTx(database, () => {
         clearFocus(database);
       });
+    },
+
+    focusCandidates() {
+      // 复用 openTasksView 的口径：能聚焦的就是"未结束"里的进行中与待办。
+      // 卡住的不列（焦点不能落在 blocked 上），已排期/没有排期只要状态是 todo 就算。
+      const focused = findFocusedTask(database);
+      const today = keyOf(new Date());
+      const focusId = focused !== undefined && focused.focusedDayKey === today ? focused.id : null;
+
+      const tasks = listTasksByStatuses(database, ['doing', 'todo']);
+      return tasks
+        .map((task) => ({
+          id: task.id,
+          title: task.title,
+          status: task.status,
+          projectTitle: task.projectId === null ? null : getProject(database, task.projectId)?.title ?? null,
+          isFocused: task.id === focusId,
+        }))
+        // 排序：当前焦点 → 进行中 → 待办。
+        // 焦点排最前是为了打开切换器时视线先落到"我现在这条"；
+        // 进行中排在待办前，因为已经在做的事更可能是你要切回去的那件。
+        .sort((a, b) => {
+          if (a.isFocused !== b.isFocused) return a.isFocused ? -1 : 1;
+          if (a.status !== b.status) return a.status === 'doing' ? -1 : 1;
+          return 0;
+        });
     },
 
     /**

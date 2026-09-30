@@ -81,6 +81,7 @@ export const api = {
   focus: () => call('tracking', 'focus'),
   focusTask: (taskId) => call('tracking', 'focusTask', taskId),
   unfocus: () => call('tracking', 'unfocus'),
+  focusCandidates: () => call('tracking', 'focusCandidates'),
   noteOnFocus: (input) => call('tracking', 'noteOnFocus', [input]),
 
   // ---------- 日志 ----------

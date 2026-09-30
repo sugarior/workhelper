@@ -24,6 +24,61 @@ async function reload() {
 // ============================================================
 
 /**
+ * 当前打开的浮层（菜单/切换器）的收起函数。
+ *
+ * 每个浮层各自监听 document 点击来收起**自己**，但那只解决了"点别处收起"。
+ * 同时打开两个时两个面板会叠在一起 —— 因此需要这个"同一时刻只允许一个"的开关。
+ */
+let closeOpenMenu = null;
+
+/**
+ * 把浮层挂在锚点元素上：固定定位 + 坐标计算，并保证同一时刻只有一个浮层打开。
+ *
+ * 为什么不能用 `position: absolute`：列表容器 `ul.list` 有 `overflow: hidden`
+ * （用来裁圆角），absolute 浮层会被裁断 —— 这正是"菜单点不到"的成因。
+ * 为什么要算坐标：靠近窗口底部时要**向上翻**，否则会被窗口切掉。
+ *
+ * @param anchor 触发按钮
+ * @param panel  浮层面板
+ * @param wrapper 带着 `.menu` 类的外层（open 状态加在它上面）
+ * @param prefer 'right' 贴锚点右边（行内按钮用）；'left' 贴锚点左边（顶部条用）
+ */
+function makeFloating(anchor, panel, wrapper, prefer = 'right') {
+  function place() {
+    const box = anchor.getBoundingClientRect();
+    const width = panel.offsetWidth || 280;
+    const height = panel.offsetHeight || 200;
+    const left = prefer === 'right'
+      ? Math.max(8, Math.min(box.right - width, window.innerWidth - width - 8))
+      : Math.max(8, Math.min(box.left, window.innerWidth - width - 8));
+    const below = box.bottom + 4;
+    const flipUp = below + height > window.innerHeight - 8 && box.top - height - 4 > 8;
+    panel.style.left = `${left}px`;
+    panel.style.top = `${flipUp ? box.top - height - 4 : below}px`;
+  }
+
+  function close() {
+    wrapper.classList.remove('open');
+    if (closeOpenMenu === close) closeOpenMenu = null;
+  }
+
+  function toggle() {
+    if (wrapper.classList.contains('open')) {
+      close();
+      return;
+    }
+    // 先关掉别的浮层：否则两个面板会重叠，点哪个都不确定落到谁身上
+    if (closeOpenMenu !== null) closeOpenMenu();
+    wrapper.classList.add('open');
+    closeOpenMenu = close;
+    place();
+  }
+
+  document.addEventListener('click', close);
+  return { toggle, close, place };
+}
+
+/**
  * 「更多 ▾」下拉菜单。
  *
  * 为什么把低频动作收进来（用户确认的界面方案 ②）：主路径必须零思考，
@@ -33,18 +88,13 @@ async function reload() {
  * 每个菜单项**必须带一行说明**（F-04 的交互要求）：这几个动作语义相近
  * （丢弃 / 删除 / 转项目），只靠名字容易点错。
  *
- * 定位用 position: fixed + 手工算坐标，原因有二：
- *  1. 列表容器 `ul.list` 有 `overflow: hidden`（用来裁圆角），
- *     absolute 浮层会被裁断 —— 这正是"菜单点不到"的成因；
- *  2. 靠近窗口底部的行，菜单需要**向上翻**而不是被窗口切掉。
- *
  * @param entries [{ label, hint, danger?, run }]
  */
 function moreMenu(entries) {
   const panel = el('div', { class: 'menu-panel' }, entries.map((entry) => el('button', {
     class: `menu-item ${entry.danger === true ? 'danger' : ''}`,
     onclick: (event) => {
-      close();
+      floating.close();
       void entry.run(event.target);
     },
   }, [
@@ -57,37 +107,12 @@ function moreMenu(entries) {
     title: '更多处理方式',
     onclick: (event) => {
       event.stopPropagation();
-      if (wrapper.classList.contains('open')) close();
-      else open();
+      floating.toggle();
     },
   }, '更多 ▾');
 
   const wrapper = el('div', { class: 'menu' }, [trigger, panel]);
-
-  /** 把面板摆到触发按钮下方；下方空间不够就翻到上方，横向贴住视口右边 */
-  function place() {
-    const anchor = trigger.getBoundingClientRect();
-    const width = panel.offsetWidth || 280;
-    const height = panel.offsetHeight || 160;
-
-    const left = Math.max(8, Math.min(anchor.right - width, window.innerWidth - width - 8));
-    const below = anchor.bottom + 4;
-    const flipUp = below + height > window.innerHeight - 8 && anchor.top - height - 4 > 8;
-    panel.style.left = `${left}px`;
-    panel.style.top = `${flipUp ? anchor.top - height - 4 : below}px`;
-  }
-
-  function open() {
-    wrapper.classList.add('open');
-    place();
-  }
-
-  function close() {
-    wrapper.classList.remove('open');
-  }
-
-  // 点别处收起：菜单是浮层，不收起会挡住在下面的条目
-  document.addEventListener('click', close);
+  const floating = makeFloating(trigger, panel, wrapper, 'right');
   return wrapper;
 }
 
@@ -664,26 +689,34 @@ export async function renderProjects(root) {
   }
 
   const projects = await api.listProjects();
-  const titleInput = el('input', { type: 'text', placeholder: '新项目名称' });
+  const titleInput = el('input', { type: 'text', placeholder: '新项目名称（Enter 创建）' });
   const goalInput = el('input', { type: 'text', placeholder: '目标（可留空）' });
+  const createButton = el('button', { class: 'primary' }, '新建项目');
 
-  const createRow = el('div', { class: 'toolbar' }, [
-    titleInput,
-    goalInput,
-    el('button', {
-      class: 'primary',
-      onclick: (event) => void withBusy(event.target, async () => {
-        const title = titleInput.value.trim();
-        if (title.length === 0) {
-          flash('请填写项目名称', 'error');
-          return;
-        }
-        await api.createProject({ title, goal: goalInput.value.trim() || null });
-        flash('项目已创建');
-        await reload();
-      }),
-    }, '新建项目'),
-  ]);
+  async function submitProject() {
+    const title = titleInput.value.trim();
+    if (title.length === 0) {
+      flash('请填写项目名称', 'error');
+      return;
+    }
+    await withBusy(createButton, async () => {
+      await api.createProject({ title, goal: goalInput.value.trim() || null });
+      flash('项目已创建');
+      await reload();
+    });
+  }
+
+  // 两个输入框都支持回车（用户反馈：必须点按钮很别扭）
+  for (const input of [titleInput, goalInput]) {
+    input.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      void submitProject();
+    });
+  }
+  createButton.addEventListener('click', () => void submitProject());
+
+  const createRow = el('div', { class: 'toolbar' }, [titleInput, goalInput, createButton]);
 
   if (projects.length === 0) {
     mount(root, [
@@ -935,9 +968,56 @@ export async function renderFocusBar(root, onChanged) {
     if (event.key === 'Escape') noteInput.blur();
   });
 
+  // 切换聚焦对象（用户提议）：记一笔时常常"其实我要记的是另一件"，
+  // 因此把任务名做成可直接切换的下拉，而不是只能去「全部」里重新点聚焦。
+  let candidates = [];
+  try {
+    candidates = await api.focusCandidates();
+  } catch {
+    candidates = [];
+  }
+
+  const others = candidates.filter((item) => !item.isFocused);
+  const switchButton = el('button', {
+    class: 'focus-title',
+    title: '切换当前任务',
+    onclick: (event) => {
+      event.stopPropagation();
+      floating.toggle();
+    },
+  }, `${focused.title} ▾`);
+
+  const switcher = el('div', { class: 'menu' }, [switchButton]);
+  const panel = el('div', { class: 'menu-panel' }, [
+    el('div', { class: 'menu-hint' }, '切换到：'),
+    ...(others.length === 0
+      ? [el('div', { class: 'menu-hint' }, '没有别的可切 —— 去「全部」里对一条任务点「聚焦」')]
+      : others.slice(0, 20).map((item) => el('button', {
+        class: 'menu-item',
+        onclick: (event) => {
+          floating.close();
+          void withBusy(event.target, async () => {
+            // todo 会被内核自动转成进行中 —— 这正是"选中即开始"
+            await api.focusTask(item.id);
+            flash(item.status === 'todo' ? '已开始并聚焦' : '已切换聚焦');
+            await onChanged();
+          });
+        },
+      }, [
+        el('span', { class: 'menu-label' }, item.title),
+        el('span', { class: 'menu-hint' }, [
+          item.status === 'todo' ? '选中即开始' : '进行中',
+          item.projectTitle === null ? '' : ` · ${item.projectTitle}`,
+        ].join('')),
+      ]))),
+  ]);
+  switcher.append(panel);
+  // 贴锚点左边：这一条在最上方，向右展开会顶到搜索框
+  const floating = makeFloating(switchButton, panel, switcher, 'left');
+
   mount(root, [
     el('span', { class: 'focus-label' }, '当前在做：'),
-    el('span', { class: 'focus-title' }, focused.title),
+    switcher,
     kindSelect,
     noteInput,
     el('button', { class: 'primary', onclick: () => void submit() }, '记一笔'),

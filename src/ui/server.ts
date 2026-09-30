@@ -64,7 +64,7 @@ const ALLOWED: Readonly<Record<string, readonly string[]>> = {
     'createSubtask', 'setSubtaskStatus', 'reorder'],
   tracking: ['addProgress', 'taskTimeline', 'todayView', 'openTasksView', 'completedView', 'addToToday', 'removeFromToday',
     'startTask', 'blockTask', 'unblockTask', 'completeTask',
-    'focus', 'focusTask', 'unfocus', 'noteOnFocus'],
+    'focus', 'focusTask', 'unfocus', 'noteOnFocus', 'focusCandidates'],
   journal: ['summarize', 'save'],
   search: ['search'],
   system: ['getSettings', 'backup', 'integrityCheck'],
