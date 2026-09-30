@@ -4,10 +4,50 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDate, stripParsedDate, parseChineseNumber } from '../src/core/day/parseDate.ts';
+import { parseDate, parseDueInput, stripParsedDate, parseChineseNumber } from '../src/core/day/parseDate.ts';
 
 const TODAY = '2026-09-30';
 const parse = (text: string) => parseDate(text, { today: TODAY });
+const due = (text: string) => parseDueInput(text, { today: TODAY });
+
+test('手工输入截止日：接受常见写法', () => {
+  const cases: [string, string | null][] = [
+    ['2026-10-08', '2026-10-08'],
+    ['2026-10-8', '2026-10-08'],
+    ['2026/10/8', '2026-10-08'],
+    ['2026.10.8', '2026-10-08'],
+    ['  2026-10-08  ', '2026-10-08'],
+    ['明天', '2026-10-01'],
+    ['下周三', '2026-10-07'],
+    ['10月8日', '2026-10-08'],
+    ['3天后', '2026-10-03'],
+    ['今天', TODAY],
+  ];
+  for (const [input, expected] of cases) {
+    assert.equal(due(input), expected, `「${input}」应解析为 ${expected}`);
+  }
+});
+
+test('手工输入截止日：拒绝不存在的日期，不静默滚动', () => {
+  // JS 的 Date 会把 2026-02-30 滚成 3-02；这里是明确的日期输入，
+  // 存一个用户没打算要的日期比报错更糟，因此必须挡住
+  for (const bad of ['2026-02-30', '2026-13-01', '2026-04-31', '2026/2/30', '2026-00-10']) {
+    assert.equal(due(bad), null, `「${bad}」不该被接受`);
+  }
+});
+
+test('手工输入截止日：看不懂就返回 null，不猜', () => {
+  for (const bad of ['', '   ', '随便写点啥', '下周', '10/8', '1008', '2026', '明天 后天']) {
+    assert.equal(due(bad), null, `「${bad}」不该被当成日期`);
+  }
+});
+
+test('手工输入截止日：命中片段必须是整段输入', () => {
+  // "随便写点啥 明天" 里虽然有"明天"，但整段不是日期，必须拒绝；
+  // 否则用户输错内容时会静默拿到一个意外的截止日
+  assert.equal(due('随便写点啥 明天'), null);
+  assert.equal(due('明天'), '2026-10-01');
+});
 
 test('中文数字转换支持 1–99', () => {
   assert.equal(parseChineseNumber('三'), 3);

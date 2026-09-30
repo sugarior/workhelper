@@ -133,10 +133,16 @@ export interface TrackingService {
   /**
    * 可以聚焦的任务（F-15b 的切换器用）。
    *
-   * 包含 `doing` 与 `todo`：`todo` 也列出来是有意的 ——
-   * 对 `todo` 聚焦会自动先转 `doing`（聚焦与开始本来就是同一个动作），
-   * 若只列 `doing`，用户想切到一条尚未开始的任务时会发现"没得选"。
-   * 界面据此把 `todo` 标成"选中即开始"。
+   * **只列今日排期的任务**（用户要求），否则候选列表会随任务量无限变长。
+   * "今日排期"的口径与「今日」视图一致：手工排入今日、或截止日 ≤ 今天。
+   *
+   * 两个有意的例外，都是为了不让这个列表变成陷阱：
+   *  1. **当前焦点本身永远列出**（即使它不在今日排期里）。否则焦点一旦脱离今日，
+   *     它就从切换器里消失，用户反而没法从它切走。
+   *  2. **`todo` 也列出**：聚焦它会自动转 `doing`（聚焦与开始是同一个动作）。
+   *     若只列 `doing`，想切到一条尚未开始的任务时会"没得选"。
+   *
+   * 排序：当前焦点 → 进行中 → 待办。
    */
   focusCandidates(): { id: string; title: string; status: TaskStatus; projectTitle: string | null; isFocused: boolean }[];
   /**
@@ -476,13 +482,21 @@ export function createTrackingService(database: DatabaseSync): TrackingService {
     },
 
     focusCandidates() {
-      // 复用 openTasksView 的口径：能聚焦的就是"未结束"里的进行中与待办。
-      // 卡住的不列（焦点不能落在 blocked 上），已排期/没有排期只要状态是 todo 就算。
-      const focused = findFocusedTask(database);
       const today = keyOf(new Date());
+      const focused = findFocusedTask(database);
+      // 跨日后旧焦点已失效，此时它不再享有"永远列出"的例外
       const focusId = focused !== undefined && focused.focusedDayKey === today ? focused.id : null;
 
-      const tasks = listTasksByStatuses(database, ['doing', 'todo']);
+      // 与「今日」视图同一个口径：手工排入今日，或截止日 ≤ 今天
+      const scheduled = listTasksByStatuses(database, ['doing', 'todo']).filter(
+        (task) => task.plannedFor === today || (task.dueDate !== null && task.dueDate <= today),
+      );
+      // 例外：当前焦点即使不在今日排期里也要列出，否则用户没法从它切走
+      const current = focusId === null ? undefined : getTask(database, focusId);
+      const tasks = current === undefined || scheduled.some((t) => t.id === current.id)
+        ? scheduled
+        : [current, ...scheduled];
+
       return tasks
         .map((task) => ({
           id: task.id,

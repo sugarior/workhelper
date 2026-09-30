@@ -14,6 +14,8 @@ import {
   getDayBoundaryHour, getSetting, TRASH_RETENTION_DAYS,
 } from '../repo/index.ts';
 import { ValidationError } from '../domain/errors.ts';
+import { parseDueInput } from '../day/parseDate.ts';
+import { todayKey } from '../day/dayKey.ts';
 import type { EntityType } from '../domain/types.ts';
 import type { TrashEntry } from '../repo/trashRepo.ts';
 
@@ -54,6 +56,15 @@ export interface SystemService {
    * 因此这里直接返回数据快照。
    */
   getSettings(): { dayBoundaryHour: number; entries: { key: string; value: unknown; updatedAt: string }[] };
+  /**
+   * 解析手工输入的截止日期（F-07 的兜底入口）。
+   *
+   * 放在 system 而不是 planning：它是**纯函数式的日期解析**，与"日界"同属日历能力，
+   * 不涉及任何任务数据。界面拿它在提交前做校验与确认，避免"存进去才发现解析错了"。
+   *
+   * @returns 成功返回日键，看不懂返回 null（界面据此提示，绝不静默存错日期）
+   */
+  parseDueInput(raw: string): string | null;
   backup(reason: 'startup' | 'manual' | 'daily' | 'weekly'): Promise<BackupFile>;
   listBackups(): BackupFile[];
   /** 按"7 个日快照 + 4 个周快照"轮换，返回删除的文件名 */
@@ -142,6 +153,10 @@ export function createSystemService(database: DatabaseSync, backupDir: string): 
     getSettings: () => ({
       dayBoundaryHour: settings.dayBoundaryHour(),
       entries: settings.list(),
+    }),
+
+    parseDueInput: (raw) => parseDueInput(raw, {
+      today: todayKey(settings.dayBoundaryHour(), new Date()),
     }),
 
     async backup(reason) {

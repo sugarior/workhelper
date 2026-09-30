@@ -247,3 +247,58 @@ export function stripParsedDate(text: string, parsed: ParsedDate | null): string
     .replace(/[ \t]{2,}/g, ' ')
     .trim();
 }
+
+/** 严格匹配 YYYY-MM-DD，不接受 2026-9-1 这类简写 */
+const ISO_DAY_KEY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** 日期是否真实存在。JS 的 Date 会把 2026-02-30 静默滚成 3-02，必须自己挡住 */
+function isRealCalendarDay(year: number, month: number, day: number): boolean {
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  return probe.getUTCFullYear() === year
+    && probe.getUTCMonth() === month - 1
+    && probe.getUTCDate() === day;
+}
+
+/**
+ * 解析**手工输入的截止日期**（F-07 的兜底入口）。
+ *
+ * 与 `parseDate` 的分工不同，别混用：
+ *  · `parseDate` 服务于**速记框**，输入是一整句话，且**宁可漏解析也不错解析**
+ *    （错解析的代价是存了个错日期，比没日期更糟）。
+ *  · 本函数服务于**明确的日期输入框**：用户的心智就是"我要设一个日期"，
+ *    因此可以**更宽容**（接受 `2026/10/8`、`2026-9-1`），
+ *    但**不能更宽松到猜**（2 月 30 日必须报错，不能悄悄滚成 3 月 2 日）。
+ *
+ * @returns 成功返回日键，失败返回 null（调用方负责提示，不要静默吞掉）
+ */
+export function parseDueInput(raw: string, options: { today: string; boundaryHour?: number }): string | null {
+  const text = raw.trim();
+  if (text.length === 0) return null;
+
+  // 1) 严格 ISO：2026-10-08
+  const iso = ISO_DAY_KEY.exec(text);
+  if (iso !== null) {
+    const [, y, m, d] = iso;
+    const year = Number(y);
+    const month = Number(m);
+    const day = Number(d);
+    return isRealCalendarDay(year, month, day) ? `${y}-${m}-${d}` : null;
+  }
+
+  // 2) 宽容的分隔符写法：2026/10/8、2026.10.8、2026-9-1
+  const loose = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(text);
+  if (loose !== null) {
+    const year = Number(loose[1]);
+    const month = Number(loose[2]);
+    const day = Number(loose[3]);
+    if (!isRealCalendarDay(year, month, day)) return null;
+    return `${loose[1]}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  }
+
+  // 3) 交给自然语言解析（明天 / 下周三 / 10月8日 / 3天后），
+  //    但要求命中片段就是整段输入 —— 否则"随便写点啥 明天"也会被当成日期
+  const parsed = parseDate(text, options);
+  if (parsed !== null && parsed.matched === text) return parsed.dayKey;
+
+  return null;
+}

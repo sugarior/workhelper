@@ -63,6 +63,10 @@ export const api = {
   createSubtask: (options) => call('planning', 'createSubtask', options),
   setSubtaskStatus: (id, status) => call('planning', 'setSubtaskStatus', [id, status]),
   reorder: (kind, movedId, beforeId) => call('planning', 'reorder', [kind, movedId, beforeId]),
+  /** 修改任务字段（截止日/优先级/预估/标题）。界面此前完全没有修改入口 */
+  updateTask: (id, patch) => call('planning', 'updateTask', [id, patch]),
+  /** 解析手工输入的截止日期；看不懂返回 null，绝不静默存错 */
+  parseDueInput: (raw) => call('system', 'parseDueInput', raw),
 
   // ---------- 推进 ----------
   todayView: (dayKey) => call('tracking', 'todayView', dayKey === undefined ? [] : [dayKey]),

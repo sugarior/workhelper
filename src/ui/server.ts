@@ -60,14 +60,14 @@ const ALLOWED: Readonly<Record<string, readonly string[]>> = {
   capture: ['quickCapture', 'listPending', 'countPending', 'classify', 'classifyMany',
     'undoLastClassification', 'deleteItem'],
   planning: ['listProjects', 'projectTree', 'createProject', 'deleteProject',
-    'listTasks', 'createTask', 'completeTask', 'reopenTask',
+    'listTasks', 'createTask', 'completeTask', 'reopenTask', 'updateTask',
     'createSubtask', 'setSubtaskStatus', 'reorder'],
   tracking: ['addProgress', 'taskTimeline', 'todayView', 'openTasksView', 'completedView', 'addToToday', 'removeFromToday',
     'startTask', 'blockTask', 'unblockTask', 'completeTask',
     'focus', 'focusTask', 'unfocus', 'noteOnFocus', 'focusCandidates'],
   journal: ['summarize', 'save'],
   search: ['search'],
-  system: ['getSettings', 'backup', 'integrityCheck'],
+  system: ['getSettings', 'backup', 'integrityCheck', 'parseDueInput'],
 };
 
 function sendJson(response: ServerResponse, status: number, payload: unknown): void {

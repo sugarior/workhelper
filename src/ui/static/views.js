@@ -603,6 +603,68 @@ function buildTaskRow(task, dayKey, extraTag, onChanged) {
     await onChanged();
   }, 'primary'));
 
+  // 编辑入口（F-07 的兜底）。此前任务建好之后**任何字段都改不了** ——
+  // 截止日期只能靠速记框顺手识别，那只是便利，不能当唯一入口。
+  actions.push(moreMenu([
+    {
+      label: task.dueDate === null ? '设置截止日' : `改截止日（现 ${task.dueDate}）`,
+      hint: '可写 2026/10/8、明天、下周三；留空或写 / 表示清除',
+      run: (button) => withBusy(button, async () => {
+        const answer = window.prompt('截止日期（留空或 / 表示清除）', task.dueDate ?? '');
+        if (answer === null) return;
+        const raw = answer.trim();
+        if (raw === '' || raw === '/') {
+          await api.updateTask(task.id, { dueDate: null });
+          flash('已清除截止日');
+          await onChanged();
+          return;
+        }
+        // 先让内核解析再提交：宁可当场报"看不懂"，也不静默存错日期
+        const dayKey = await api.parseDueInput(raw);
+        if (dayKey === null) {
+          flash(`看不懂「${raw}」这个日期，可写 2026/10/8、明天、下周三`, 'error');
+          return;
+        }
+        await api.updateTask(task.id, { dueDate: dayKey });
+        flash(`截止日已设为 ${dayKey}`);
+        await onChanged();
+      }),
+    },
+    {
+      label: `优先级（现 ${{ high: '高', normal: '中', low: '低' }[task.priority] ?? task.priority}）`,
+      hint: '依次切换 高 → 中 → 低',
+      run: (button) => withBusy(button, async () => {
+        const next = task.priority === 'high' ? 'normal' : task.priority === 'normal' ? 'low' : 'high';
+        await api.updateTask(task.id, { priority: next });
+        flash(`优先级已设为 ${{ high: '高', normal: '中', low: '低' }[next]}`);
+        await onChanged();
+      }),
+    },
+    {
+      label: `预估时长（现 ${task.estimateMinutes === null ? '未填' : `${task.estimateMinutes} 分钟`}）`,
+      hint: '填个大概，不做计时；留空表示清除',
+      run: (button) => withBusy(button, async () => {
+        const answer = window.prompt('预估分钟数（留空表示清除）', task.estimateMinutes === null ? '' : String(task.estimateMinutes));
+        if (answer === null) return;
+        const raw = answer.trim();
+        if (raw === '') {
+          await api.updateTask(task.id, { estimateMinutes: null });
+          flash('已清除预估时长');
+          await onChanged();
+          return;
+        }
+        const minutes = Number(raw);
+        if (!Number.isInteger(minutes) || minutes <= 0) {
+          flash('预估时长要是正整数分钟数', 'error');
+          return;
+        }
+        await api.updateTask(task.id, { estimateMinutes: minutes });
+        flash(`预估时长已设为 ${minutes} 分钟`);
+        await onChanged();
+      }),
+    },
+  ]));
+
   return el('li', {}, [
     el('span', {}, STATUS_MARK[task.status] ?? '·'),
     el('div', { class: 'item-body' }, [
