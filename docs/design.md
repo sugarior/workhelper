@@ -349,7 +349,55 @@ CREATE VIRTUAL TABLE search_fts USING fts5(
 );
 ```
 
-### 4.5 几个设计取舍的理由
+### 4.5 资料的数据模型（迁移 003 / 004）
+
+需求把资料重新定位为**指针**（需求 §4.1），并确认了"入口要能按常用程度排序"（需求 §4.2 D2）。
+后者直接决定了入口**不能塞进一个 JSON 字段，必须是子表**——否则无法对单个入口排序。
+
+```sql
+-- 003_material_entries.sql
+-- 资料本身复用 archive_items，但语义变了：它现在是"指针的容器"。
+-- 旧的 task_id / project_id 单值关联保留到 004 完成迁移后再删。
+
+CREATE TABLE archive_entries (
+  id         TEXT PRIMARY KEY,
+  archive_id TEXT NOT NULL REFERENCES archive_items(id) ON DELETE CASCADE,
+  kind       TEXT NOT NULL CHECK (kind IN ('dir', 'file', 'url')),
+  target     TEXT NOT NULL,          -- 绝对路径或 URL，原样保存不做规范化
+  note       TEXT,                   -- 该入口自己的注释（需求 §4.2 D4）
+  sort_order REAL NOT NULL DEFAULT 1,-- 入口级排序，支持"按常用程度"
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  deleted_at TEXT
+);
+CREATE INDEX idx_archive_entries ON archive_entries(archive_id, sort_order) WHERE deleted_at IS NULL;
+
+-- 004_material_links.sql
+-- 一条资料可挂靠多个任务/项目（需求 §4.2 D2 + F-12）。
+
+CREATE TABLE archive_links (
+  archive_id TEXT NOT NULL REFERENCES archive_items(id) ON DELETE CASCADE,
+  target_type TEXT NOT NULL CHECK (target_type IN ('task', 'project')),
+  target_id   TEXT NOT NULL,        -- 多态，故无外键；由服务层保证存在性
+  created_at  TEXT NOT NULL,
+  PRIMARY KEY (archive_id, target_type, target_id)
+);
+CREATE INDEX idx_archive_links_target ON archive_links(target_type, target_id);
+```
+
+**为什么 `archive_links.target_id` 不设外键**：它要同时指向 `tasks` 与 `projects`，
+SQLite 没有多态外键。代价是删除任务时需要服务层显式清理关联行
+（`deleteTask` 里加一步；同时 `verify` 增加"孤儿挂靠"检查项兜底）。
+
+**"必须挂靠"如何强制**：这是跨行的约束，数据库层做不到（一条资料可以有零行 link）。
+因此由**服务层在创建/更新资料时校验**，并在 `verify` 里加一条自检：
+"存在挂靠数为 0 的正式资料"。这与"进度记录恰好挂一个父对象"用 `CHECK` 强制的思路不同——
+那条是行内约束，这条是聚合约束，只能靠服务层 + 自检。
+
+**搜索索引**：资料的索引文本要包含**全部入口的 target 与 note**，
+这样才能实现需求 F-15 的"搜资料的标题/注释/路径"。规则：`indexEntity` 时把入口拼进 body。
+
+### 4.6 几个设计取舍的理由
 
 | 取舍 | 原因 |
 | --- | --- |
@@ -626,17 +674,28 @@ M0 用浏览器窗口模拟；M1 用 Tauri 的无边框置顶窗 + 全局快捷�
 
 | 页签 | 内容 | 验证的需求 |
 | --- | --- | --- |
-| **收件箱** | 待处理列表 + 多选 + `转任务 / 存为资料 / 丢弃`；顶部显示待处理数量 | F-04、需求 §6.5 |
+| **收件箱** | 待处理列表 + 多选 + `转任务`（可指定项目）/ `转项目` / `存为资料`（**必须先选目标**）/ `丢弃` / `删除`；顶部显示待处理数量 | F-04、需求 §6.5 |
 | **全部** | **所有未结束任务**，分六组：逾期 / 今天到期 / 进行中 / 卡住 / 已排期（未来）/ 没有排期。每组可 `记一笔`、`排入今日`、状态推进、`完成` | **F-09、需求 §6.6 可见性约束** |
 | **今日** | 逾期 / 今天到期 / 已排入今日 / 阻塞 四组；额外显示"还有 N 条不在这里"的指引 | F-08、F-10 |
 | **项目** | 项目 → 任务 → 子任务树；行内展开进展时间线（**拖拽排序尚未接界面**） | F-06、F-07 |
-| **日志** | 日期选择器 + 自动汇总区（只读）+ 手工正文编辑区 | F-18、F-19 |
+| **日志** | 日期选择器 + 自动汇总区（只读）+ 手工正文编辑区 | F-20、F-21 |
+| **资料** | 按时间倒序列出资料；可筛"未挂靠"；可改/追加挂靠；多选入口批量打开。**默认显示，设置里可隐藏** | **F-11 ~ F-14** |
 
 **两个计数徽标常驻顶部**：收件箱积压数、**未结束任务总数**（有逾期时转红）。
 后者是契约 V3 的落点——不这样做，积压会静默增长而我不知道。
 
-M0 **刻意不做**：悬浮组件、托盘、全局快捷键、提醒、AI、导出、附件上传。
-**资料浏览页（F-12）与拖拽排序（F-06）尚未实现**，属已知缺口，见 §11.5。
+**任务/项目上的资料展示**（需求 F-14）：折叠一行 `📎 资料 3 条` → 展开后每个入口一个复选框 + 打开按钮，
+底部一个 `[打开选中的 N 项]`。**不自动打开**，保持"自动化都要经我同意"的一致风格。
+
+**收件箱工具栏的布局**（用户确认"选 ② + 需要文字提示"）：
+主按钮保持 `转任务` / `存为资料` / `丢弃` 一眼可辨；
+`转项目`、`删除`、`撤销` 收进 **`更多 ▾`** 菜单，**每个菜单项带一行说明**
+（如"转项目 —— 这一条本身就是一件事"）。理由是这些动作低频，而主路径必须保持零思考。
+
+M0 **刻意不做**：悬浮组件、托盘、全局快捷键、提醒、AI、导出、附件上传（**含文件本体落盘**）。
+**资料关联、拖拽排序尚未实现**，属已知缺口，见 §11.5。
+**拖入文件识别真实路径需要 Tauri**——浏览器拿不到 `File` 的绝对路径（安全限制），
+这是环境约束而非取舍，已在需求 F-13 注明。
 
 ### 7.4 可见性契约的实现要点（§6.6 的落点）
 
