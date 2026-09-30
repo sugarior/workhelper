@@ -1,4 +1,4 @@
-﻿// 服务层统一出口。界面层只通过这里访问业务能力，
+// 服务层统一出口。界面层只通过这里访问业务能力，
 // 不直接接触 repo/ 或 db/（docs/design.md §2.2 分层纪律）。
 
 import { join } from 'node:path';
@@ -11,12 +11,14 @@ import { createTrackingService } from './trackingService.ts';
 import { createJournalService } from './journalService.ts';
 import { createSearchService } from './searchService.ts';
 import { createSystemService } from './systemService.ts';
+import { createMaterialService } from './materialService.ts';
 import type { CaptureService } from './captureService.ts';
 import type { PlanningService } from './planningService.ts';
 import type { TrackingService } from './trackingService.ts';
 import type { JournalService } from './journalService.ts';
 import type { SearchService } from './searchService.ts';
 import type { SystemService } from './systemService.ts';
+import type { MaterialService } from './materialService.ts';
 
 export interface WorkHelperServices {
   capture: CaptureService;
@@ -25,6 +27,7 @@ export interface WorkHelperServices {
   journal: JournalService;
   search: SearchService;
   system: SystemService;
+  material: MaterialService;
   /** 当前日键（按已配置的日界计算），各调用方共用同一口径 */
   currentDayKey(): string;
 }
@@ -44,6 +47,7 @@ export function createServices(database: DatabaseSync, options: CreateServicesOp
     journal: createJournalService(database),
     search: createSearchService(database),
     system: createSystemService(database, backupDir),
+    material: createMaterialService(database),
     currentDayKey() {
       return dayKeyFromIso(nowIso(), getDayBoundaryHour(database));
     },
@@ -57,4 +61,7 @@ export type { TrackingService, TodayView, OpenTasksView } from './trackingServic
 export type { JournalService, JournalSummary, CompletedSubtask } from './journalService.ts';
 export type { SearchService, ResolvedHit } from './searchService.ts';
 export type { SystemService, BackupFile, IntegrityReport } from './systemService.ts';
+export type { MaterialService, Material, MaterialLinkTarget, EntryInput } from './materialService.ts';
+export { parseEntries, looksLikeEntry } from '../material/entries.ts';
+export type { EntryDraft, ParsedEntries } from '../material/entries.ts';
 export type { TrashEntry, IgnoredEntry } from '../repo/trashRepo.ts';

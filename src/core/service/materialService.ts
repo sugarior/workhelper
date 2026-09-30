@@ -12,10 +12,10 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { withTx } from '../db/index.ts';
 import {
-  createArchive, createEntry, deleteArchive, deleteEntry, getArchive, getProject, getTask,
-  linkMaterialIfAbsent, listArchives, listArchivesByIds, listArchivesLinkedTo, listEntries,
-  listEntriesForArchives, listLinks, listLinksForArchives, listOrphanArchives, unlinkMaterial,
-  updateArchive, updateEntry,
+  createArchive, createEntry, deleteArchive, deleteEntriesForArchive, deleteEntry, getArchive,
+  getProject, getTask, linkMaterialIfAbsent, listArchives, listArchivesByIds, listArchivesLinkedTo,
+  listEntries, listEntriesForArchives, listLinks, listLinksForArchives, listOrphanArchives,
+  unlinkMaterial, updateArchive, updateEntry,
 } from '../repo/index.ts';
 import { createIndexer } from './indexer.ts';
 import { assertNonEmptyText } from '../domain/rules.ts';
@@ -260,6 +260,8 @@ export function createMaterialService(database: DatabaseSync): MaterialService {
     remove(id) {
       withTx(database, () => {
         if (getArchive(database, id) === undefined) throw new NotFoundError(`资料不存在：${id}`);
+        // 入口必须一起软删除：留着会让它继续被算作有效内容（见仓储层说明）
+        deleteEntriesForArchive(database, id);
         deleteArchive(database, id);
         indexer.remove('archive', id);
       });

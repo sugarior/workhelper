@@ -12,6 +12,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { useDb } from './helpers/db.ts';
 import { createMaterialService } from '../src/core/service/materialService.ts';
+import { createCaptureService } from '../src/core/service/captureService.ts';
 import { createPlanningService } from '../src/core/service/planningService.ts';
 import { createTrackingService } from '../src/core/service/trackingService.ts';
 import { createSearchService } from '../src/core/service/searchService.ts';
@@ -257,6 +258,56 @@ test('删除：软删除后读不到，也不再出现在列表里', () => {
     assert.throws(() => materials.get(material.id), NotFoundError);
     assert.deepEqual(materials.list(), []);
     // 任务上的资料列表也应为空
+    assert.deepEqual(materials.listForTarget('task', task.id), []);
+  });
+});
+
+test('删除：软删除资料时，入口一并软删除（否则它仍被算作有效内容）', () => {
+  useDb((database) => {
+    const materials = createMaterialService(database);
+    const planning = createPlanningService(database);
+    const task = planning.createTask({ title: '任务' });
+    const material = materials.create({
+      entries: [{ kind: 'dir', target: DIR }, { kind: 'url', target: URL }],
+      targets: [{ type: 'task', id: task.id }],
+    });
+    assert.equal(listEntries(database, material.id).length, 2);
+
+    materials.remove(material.id);
+    assert.deepEqual(listEntries(database, material.id), [], '入口必须跟着消失');
+  });
+});
+
+test('有效挂靠：指向已删除任务的挂靠不算数（资料应被算作未挂靠）', () => {
+  useDb((database) => {
+    const materials = createMaterialService(database);
+    const planning = createPlanningService(database);
+    const task = planning.createTask({ title: '会被删掉的任务' });
+    const material = materials.create({ entries: [{ kind: 'dir', target: DIR }], targets: [{ type: 'task', id: task.id }] });
+    assert.deepEqual(listOrphanArchives(database), [], '一开始有着落');
+
+    // 软删除任务：挂靠行还在（软删除不删行），但目标不再活动
+    planning.deleteTask(task.id);
+    // 关键：判定必须自己带 deleted_at 条件，不能依赖"删除时顺手清理"——
+    // 否则资料会看起来有着落，点进去什么都没有
+    assert.equal(countValidLinks(database, material.id), 0);
+    assert.deepEqual(listOrphanArchives(database), [material.id], '应被算作未挂靠，好让资料页能处理它');
+  });
+});
+
+test('撤销转出：资料被撤销后，任务上的资料列表里不能还留着它', () => {
+  useDb((database) => {
+    const materials = createMaterialService(database);
+    const capture = createCaptureService(database);
+    const planning = createPlanningService(database);
+    const task = planning.createTask({ title: '挂靠目标' });
+
+    const { item } = capture.quickCapture({ text: DIR });
+    const result = capture.classify(item.id, { kind: 'archive', links: [{ type: 'task', id: task.id }] });
+    assert.equal(materials.listForTarget('task', task.id).length, 1);
+
+    capture.undoLastClassification();
+    // 只查挂靠表会返回已删除资料的行，于是任务详情里会出现一条点不开的资料
     assert.deepEqual(materials.listForTarget('task', task.id), []);
   });
 });

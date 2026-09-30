@@ -17,23 +17,30 @@ import { createJournalService } from '../src/core/service/journalService.ts';
 import { closeDatabase } from '../src/core/db/connection.ts';
 import { ValidationError } from '../src/core/domain/errors.ts';
 
-test('搜索：分类产生的资料条目立刻可搜（F-11 要求搜资料全文）', () => {
+test('搜索：分类产生的资料条目立刻可搜（F-15 要求搜资料的路径与注释）', () => {
   useDb((database) => {
     const capture = createCaptureService(database);
+    const planning = createPlanningService(database);
     const search = createSearchService(database);
+    const task = planning.createTask({ title: '写迁移方案' });
 
-    const { item } = capture.quickCapture({ text: '会议结论：需要补充附件三' });
-    capture.classify(item.id, { kind: 'archive', archiveKind: 'meeting' });
+    // 资料是指针：正文里要有可识别的路径，并显式给挂靠目标（规则 M1/M2）
+    const { item } = capture.quickCapture({ text: '\\\\nas\\设计\\迁移方案_v3.docx  需要补充附件三' });
+    capture.classify(item.id, { kind: 'archive', archiveKind: 'meeting', links: [{ type: 'task', id: task.id }] });
 
     // 曾经漏接：资料只在 reindexAll() 时才进索引，分类后立刻搜是搜不到的。
     // 注意结果里还会有原始收件箱条目——快记时它已被索引且仍然存在（有意为之，
     // 便于按"下周三"这类被剥离的日期片段搜回原始输入），因此这里不假设只有一条。
-    const hits = search.search('附件三');
-    const archiveHit = hits.find((hit) => hit.entityType === 'archive');
-    assert.ok(archiveHit !== undefined, `刚归档的资料必须立刻能搜到，实际命中：${JSON.stringify(hits.map((h) => h.entityType))}`);
-    assert.equal(archiveHit.entityLabel, '资料');
-    assert.equal(archiveHit.alive, true);
-    assert.match(archiveHit.displayTitle, /附件三/);
+    for (const [query, why] of [['迁移方案_v3', '入口路径'], ['需要补充附件三', '入口注释']]) {
+      const hits = search.search(query);
+      const archiveHit = hits.find((hit) => hit.entityType === 'archive');
+      assert.ok(
+        archiveHit !== undefined,
+        `刚归档的资料必须立刻能搜到「${query}」（${why}），实际命中：${JSON.stringify(hits.map((h) => h.entityType))}`,
+      );
+      assert.equal(archiveHit.entityLabel, '资料');
+      assert.equal(archiveHit.alive, true);
+    }
   });
 });
 

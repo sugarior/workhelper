@@ -6,25 +6,35 @@
 //
 // 例：'整理Q3数据平台迁移方案' -> 'q3 整理 数据 据平 平台 台迁 迁移 移方 方案'
 
-const CJK_RUN = /[\u4e00-\u9fff\u3400-\u4dbf]+/g;
-const ASCII_WORD = /[A-Za-z0-9_]+/g;
+const ASCII_WORD = /[A-Za-z0-9_]+/;
+/** 任一可索引片段（ASCII 词或中文串），用来按**原文顺序**遍历 */
+const ANY_CHUNK = /[A-Za-z0-9_]+|[\u4e00-\u9fff\u3400-\u4dbf]+/g;
 
-/** 把任意文本折叠成 FTS5 可正确切分的检索串 */
+/**
+ * 把任意文本折叠成 FTS5 可正确切分的检索串。
+ *
+ * **必须按原文顺序输出**：曾有两个各自独立的循环（先全部 ASCII 词、再全部中文 bigram），
+ * 于是中英混排的顺序被丢掉：
+ *   索引 "…迁移方案_v3.docx…" → `nas _v3 docx 设计 迁移 移方 方案 …`
+ *   查询 "迁移方案_v3"        → `_v3 迁移 移方 方案`
+ * `_v3` 跑到最前面，短语匹配就永远命中不了 —— 中英混排的查询全都搜不到，
+ * 而纯中文查询碰巧顺序自洽，所以这个问题藏了很久（见 design.md 缺陷表 36）。
+ */
 export function toTokens(text: string): string {
   const parts: string[] = [];
 
-  for (const matched of text.matchAll(ASCII_WORD)) {
-    parts.push(matched[0].toLowerCase());
-  }
-
-  for (const matched of text.matchAll(CJK_RUN)) {
-    const run = matched[0];
-    if (run.length === 1) {
-      parts.push(run);
+  for (const matched of text.matchAll(ANY_CHUNK)) {
+    const chunk = matched[0];
+    if (ASCII_WORD.test(chunk)) {
+      parts.push(chunk.toLowerCase());
       continue;
     }
-    for (let i = 0; i < run.length - 1; i += 1) {
-      parts.push(run.slice(i, i + 2));
+    if (chunk.length === 1) {
+      parts.push(chunk);
+      continue;
+    }
+    for (let i = 0; i < chunk.length - 1; i += 1) {
+      parts.push(chunk.slice(i, i + 2));
     }
   }
 
@@ -38,8 +48,14 @@ export function isFtsQueryUsable(text: string): boolean {
 }
 
 /**
- * 把折叠后的查询串成 FTS5 的列限定短语匹配。
- * 双引号内的内容被视为短语，因此需转义内部的引号。
+ * 把折叠后的查询串成 FTS5 的列限定匹配。
+ *
+ * 用 **AND（空格分隔）而不是短语**：折叠是逐段做的，查询里的词序与正文的词序
+ * 本来就不需要相同 —— "方案_v3" 要能命中 "…迁移方案_v3.docx…"。
+ * 用短语匹配时，任何跨越"中文/非中文"边界的查询都会落空。
+ *
+ * 精度由 bigram 本身保证（"迁移 移方 方案" 三个 bigram 同时命中才返回），
+ * 因此放宽到 AND 不会引入明显的误召回。
  */
 export function buildFtsMatch(query: string): string | null {
   if (!isFtsQueryUsable(query)) return null;

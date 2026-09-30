@@ -6,17 +6,20 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { withTx } from '../db/index.ts';
 import {
-  archiveInboxItem, countPendingInbox, createArchive, createInboxItem, createProject, createTask,
-  deleteArchive, deleteProject, deleteTask, getInboxItem, listPendingInbox,
-  markConverted, restoreConverted, getDayBoundaryHour, getSetting, setSetting,
+  archiveInboxItem, countPendingInbox, createArchive, createEntry, createInboxItem, createProject,
+  createTask, deleteArchive, deleteEntriesForArchive, deleteProject, deleteTask, getInboxItem,
+  getProject, getTask, linkMaterialIfAbsent, listPendingInbox, markConverted, restoreConverted,
+  getDayBoundaryHour, getSetting, setSetting,
 } from '../repo/index.ts';
 import { parseDate, stripParsedDate } from '../day/parseDate.ts';
+import { parseEntries } from '../material/entries.ts';
+import type { EntryDraft } from '../material/entries.ts';
 import { createIndexer } from './indexer.ts';
 import type { Indexer } from './indexer.ts';
 import { dayKeyFromIso, nowIso } from '../domain/clock.ts';
 import { todayKey } from '../day/dayKey.ts';
-import { InvalidTransitionError, NotFoundError } from '../domain/errors.ts';
-import type { ArchiveKind, EntityType, InboxItem, InboxKindHint, InboxStatus, Task } from '../domain/types.ts';
+import { InvalidTransitionError, NotFoundError, ValidationError } from '../domain/errors.ts';
+import type { ArchiveKind, EntityType, InboxItem, InboxKindHint, InboxStatus, MaterialLinkType, Task } from '../domain/types.ts';
 import type { ParsedDate } from '../day/parseDate.ts';
 
 /** 分类目标：把一条收件箱碎片变成什么 */
@@ -29,7 +32,14 @@ export type ClassifyTarget =
    * 若先转成任务，之后没有任何路径能把它升级为项目。
    */
   | { kind: 'project'; goal?: string | null }
-  | { kind: 'archive'; archiveKind?: ArchiveKind }
+  /**
+   * 存为资料（需求 F-12 规则 M2）。
+   *
+   * `links` **必须至少一个** —— 这就是"转资料时必须选择目标"在类型上的体现。
+   * 本层刻意不提供"关联到当前正在做的任务"的默认值：
+   * 自动挂错任务的犯错成本（之后找不到）远高于多选一次。
+   */
+  | { kind: 'archive'; archiveKind?: ArchiveKind; links?: { type: MaterialLinkType; id: string }[] }
   | { kind: 'discard' };
 
 /** 分类会新建的实体类型（discard 不新建，故不在内） */
@@ -133,7 +143,16 @@ export interface CaptureService {
     text: string;
     kindHint?: InboxKindHint | null;
     dryRun?: boolean;
-  }): { item: InboxItem | null; parsed: ParsedDate | null; title: string };
+  }): {
+    item: InboxItem | null;
+    parsed: ParsedDate | null;
+    title: string;
+    /**
+     * 识别出的资料入口（`kindHint === 'note'` 且输入含路径/链接时）。
+     * 界面用它做"识别到 N 个入口"的即时预览 —— 这正是需求 §4.2 D4 要的效果。
+     */
+    entries: EntryDraft[];
+  };
   listPending(options?: { limit?: number }): InboxItem[];
   countPending(): number;
   classify(id: string, target: ClassifyTarget): ClassifyResult;
@@ -183,14 +202,55 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
     }
 
     if (target.kind === 'archive') {
+      /**
+       * 资料：在**这一刻**创建，而不是速记时（需求 §4.1 规则 M1）。
+       *
+       * 必须先选好目标才能提交 —— 这就是规则 M2 的落点：
+       * 目标由调用方显式传入，本层**没有**"关联到当前正在做的任务"这种分支。
+       * 收件箱阶段的资料允许无挂靠（它是待处理的输入），
+       * 但**一旦成为正式资料就必须有关联**。
+       */
+      const links = target.links ?? [];
+      if (links.length === 0) {
+        throw new ValidationError('存为资料前必须选一个任务或项目 —— 资料不挂靠就会变成没人管的堆积');
+      }
+      for (const link of links) {
+        if (link.type === 'task' && getTask(database, link.id) === undefined) {
+          throw new NotFoundError(`任务不存在，无法挂靠：${link.id}`);
+        }
+        if (link.type === 'project' && getProject(database, link.id) === undefined) {
+          throw new NotFoundError(`项目不存在，无法挂靠：${link.id}`);
+        }
+      }
+
+      // 入口来自正文的解析（速记时原样保存，这里才解析）
+      const detected = parseEntries(item.body).entries;
+      // 一条资料至少要有一个入口；识别不出路径/链接时它就不是指针，
+      // 因此直接拒绝并说明替代做法 —— 而不是"存一条没有入口的资料"。
+      // 校验放在写库之前：拒绝时不应留下任何半成品。
+      if (detected.length === 0) {
+        throw new ValidationError(
+          '这条里没有可识别的路径或链接，因此不能作为资料。若只是要留存文字，请改成任务或留在收件箱里。',
+        );
+      }
+
       const archive = createArchive(database, {
         kind: target.archiveKind ?? 'note',
-        title: item.body,
-        body: item.rawInput !== null && item.rawInput !== item.body ? item.rawInput : null,
+        title: detected[0]!.note ?? detected[0]!.target,
         dayKey,
       });
+      for (const draft of detected) {
+        createEntry(database, {
+          archiveId: archive.id,
+          kind: draft.kind,
+          target: draft.target,
+          note: draft.note,
+        });
+      }
+      for (const link of links) linkMaterialIfAbsent(database, archive.id, link.type, link.id);
+
       markConverted(database, id, `archive:${archive.id}`);
-      // 资料条目必须进索引：需求 F-11 要求能搜到资料全文。
+      // 资料必须进索引：需求 F-15 要求能搜到资料的路径与注释。
       // 这里曾经漏接，导致分类产生的资料永远搜不到。
       indexer.archive(archive);
       return { inboxId: id, createdKind: 'archive', createdId: archive.id };
@@ -225,26 +285,46 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
       const trimmed = text.trim();
       const at = nowIso();
       const dayKey = dayKeyFromIso(at, boundaryHour());
-      const parsed = parseDate(trimmed, { today: dayKey });
-      const stripped = parsed === null ? trimmed : stripParsedDate(trimmed, parsed);
+
+      /**
+       * 「资料」芯片走另一条路（需求 F-13 / §4.2 D4）：
+       * 速记板允许多行粘贴，每行一个入口。
+       *
+       * **正文原样保存**（只 trim，不拆分重写）—— 解析留到转出时。
+       * 这样既不会因为渲染再解析而改写用户输入，也让解析规则可以独立演进
+       * （它是纯函数，有自己的测试）。
+       *
+       * **刻意不在这一步创建资料行**：资料必须挂靠（规则 M1），
+       * 而此刻还没有目标 —— 若提前建行，它在被挂靠前就是孤儿，
+       * 资料页会先看到一条违反 M1 的东西。
+       */
+      const isNote = input.kindHint === 'note';
+      const entries = isNote ? parseEntries(trimmed) : { entries: [], leftovers: [] };
+      // 标题：资料取第一行（用来在收件箱里认出这条是什么），其余与 todo 一致
+      const firstLine = trimmed.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0) ?? trimmed;
+      const titleSource = isNote ? firstLine : trimmed;
+
+      const parsed = parseDate(titleSource, { today: dayKey });
+      const stripped = parsed === null ? titleSource : stripParsedDate(titleSource, parsed);
       // 标题被剥离过才保留原文，便于回溯"我当时到底写了什么"
-      const title = stripped.length === 0 ? trimmed : stripped;
-      const rawInput = title === trimmed ? null : trimmed;
+      const title = stripped.length === 0 ? titleSource : stripped;
+      const body = isNote ? trimmed : title;
+      const rawInput = body === trimmed ? null : trimmed;
 
       if (input.dryRun === true) {
-        return { item: null, parsed, title };
+        return { item: null, parsed, title, entries: entries.entries };
       }
 
       const item = withTx(database, () =>
         createInboxItem(database, {
-          body: title,
+          body,
           parsedDue: parsed?.dayKey ?? null,
           kindHint: input.kindHint ?? null,
           rawInput,
         }),
       );
       indexer.inbox(item);
-      return { item, parsed, title };
+      return { item, parsed, title, entries: entries.entries };
     },
 
     listPending(options = {}) {
@@ -306,7 +386,11 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
         for (const entry of record.created) {
           if (entry.kind === 'task') deleteTask(database, entry.id);
           else if (entry.kind === 'project') deleteProject(database, entry.id);
-          else deleteArchive(database, entry.id);
+          else {
+            // 资料：入口要一起软删除，否则残留的入口会让人以为这条资料还有效
+            deleteEntriesForArchive(database, entry.id);
+            deleteArchive(database, entry.id);
+          }
           indexer.remove(entry.kind, entry.id);
         }
 

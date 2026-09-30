@@ -94,6 +94,19 @@ export const api = {
   /** 已中止总览：事情不做了的那些，按中止日分组 */
   abortedView: (range) => call('tracking', 'abortedView', [range]),
 
+  // ---------- 资料（F-11~F-14） ----------
+  /** 创建资料：入口与挂靠目标必须一次给全（规则 M1 —— 不留零挂靠的中间态） */
+  createMaterial: (input) => call('material', 'create', input),
+  getMaterial: (id) => call('material', 'get', id),
+  listMaterials: (options) => call('material', 'list', [options ?? {}]),
+  /** 某个任务/项目上挂着的资料（任务详情的折叠行用） */
+  materialsForTarget: (type, id) => call('material', 'listForTarget', [type, id]),
+  updateMaterial: (id, patch) => call('material', 'update', [id, patch]),
+  linkMaterial: (id, targets) => call('material', 'link', [id, targets]),
+  unlinkMaterial: (id, target) => call('material', 'unlink', [id, target]),
+  removeMaterial: (id) => call('material', 'remove', id),
+  materialEntryTargets: (id) => call('material', 'entryTargets', id),
+
   // ---------- 焦点（F-15b / F-15c） ----------
   focus: () => call('tracking', 'focus'),
   focusTask: (taskId) => call('tracking', 'focusTask', taskId),

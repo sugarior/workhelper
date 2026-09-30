@@ -12,6 +12,7 @@ import { createTask, getTask, listTasks } from '../src/core/repo/taskRepo.ts';
 import { listProjects } from '../src/core/repo/projectRepo.ts';
 import { listSubtasks } from '../src/core/repo/subtaskRepo.ts';
 import { listArchives } from '../src/core/repo/archiveRepo.ts';
+import { listEntries, listArchivesLinkedTo } from '../src/core/repo/materialRepo.ts';
 import { getInboxItem } from '../src/core/repo/inboxRepo.ts';
 import { InvalidTransitionError, ValidationError } from '../src/core/domain/errors.ts';
 
@@ -79,20 +80,61 @@ test('分类为任务：携带来源、解析出的截止日与优先级', () =>
   });
 });
 
-test('分类为资料 / 丢弃', () => {
+test('分类为资料 / 忽略', () => {
   useDb((database) => {
     const capture = createCaptureService(database);
-    const asArchive = capture.quickCapture({ text: '会议结论：需要补充附件三' }).item;
+    const planning = createPlanningService(database);
+    const task = planning.createTask({ title: '写迁移方案' });
+    // 资料是指针：正文里要有可识别的路径或链接（需求 F-12 / M3）
+    const asArchive = capture.quickCapture({ text: 'D:\\work\\q3-migration  工作区' }).item;
     const asDiscard = capture.quickCapture({ text: '垃圾信息' }).item;
 
-    const archiveResult = capture.classify(asArchive.id, { kind: 'archive', archiveKind: 'meeting' });
+    const archiveResult = capture.classify(asArchive.id, {
+      kind: 'archive',
+      archiveKind: 'meeting',
+      links: [{ type: 'task', id: task.id }],
+    });
     assert.equal(archiveResult.createdKind, 'archive');
     assert.equal(listArchives(database)[0]?.kind, 'meeting');
+    // 入口必须真的落库（从正文解析出来的）
+    assert.deepEqual(listEntries(database, archiveResult.createdId).map((e) => e.target), ['D:\\work\\q3-migration']);
+    assert.deepEqual(listArchivesLinkedTo(database, 'task', task.id), [archiveResult.createdId]);
 
     const discardResult = capture.classify(asDiscard.id, { kind: 'discard' });
     assert.equal(discardResult.createdKind, 'inbox');
     assert.equal(getInboxItem(database, asDiscard.id)?.status, 'archived');
     assert.equal(capture.countPending(), 0);
+  });
+});
+
+test('分类为资料：不选目标必须被拒绝（规则 M2 的落点）', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    const item = capture.quickCapture({ text: 'D:\\work\\proj' }).item;
+
+    // 这就是"绝不自动关联当前正在做的任务"在行为上的体现：
+    // 没有目标就提交不了，服务层没有"猜一个目标"的分支
+    assert.throws(
+      () => capture.classify(item.id, { kind: 'archive' }),
+      /必须选一个任务或项目/,
+    );
+    assert.equal(getInboxItem(database, item.id)?.status, 'pending', '被拒绝后条目必须还在');
+    assert.equal(listArchives(database).length, 0, '不应留下半成品');
+  });
+});
+
+test('分类为资料：正文里没有路径/链接时要说清替代做法', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    const planning = createPlanningService(database);
+    const task = planning.createTask({ title: '任务' });
+    const item = capture.quickCapture({ text: '随口记一句，没有任何路径' }).item;
+
+    assert.throws(
+      () => capture.classify(item.id, { kind: 'archive', links: [{ type: 'task', id: task.id }] }),
+      /没有可识别的路径或链接/,
+    );
+    assert.equal(getInboxItem(database, item.id)?.status, 'pending');
   });
 });
 
@@ -163,18 +205,22 @@ test('撤销：转项目后可整体撤销，项目消失且条目回到待处�
 test('撤销：混合批量（项目 + 任务 + 资料）能一次全部回退', () => {
   useDb((database) => {
     const capture = createCaptureService(database);
+    const planning = createPlanningService(database);
+    const anchor = planning.createTask({ title: '挂靠目标' });
     const asProject = capture.quickCapture({ text: '该立项的' }).item.id;
     const asTask = capture.quickCapture({ text: '该做成任务的' }).item.id;
-    const asArchive = capture.quickCapture({ text: '该留存的' }).item.id;
+    // 资料要有可识别路径，并显式给挂靠目标（规则 M1/M2）
+    const asArchive = capture.quickCapture({ text: 'D:\\work\\该留存的' }).item.id;
 
     capture.classify(asProject, { kind: 'project' });
     capture.classify(asTask, { kind: 'task' });
-    capture.classify(asArchive, { kind: 'archive' });
+    capture.classify(asArchive, { kind: 'archive', links: [{ type: 'task', id: anchor.id }] });
     // 单条分类各自写撤销点，最后一次撤销只回退最后一条
     assert.equal(capture.undoLastClassification(), true);
     assert.equal(listArchives(database).length, 0);
     assert.equal(listProjects(database).length, 1, '项目不受最后一次撤销影响');
-    assert.equal(listTasks(database).length, 1);
+    assert.equal(listTasks(database).length, 2, '分类出的任务 + 挂靠用的锚点任务');
+    assert.deepEqual(listArchivesLinkedTo(database, 'task', anchor.id), [], '挂靠要随资料一起回退');
   });
 });
 

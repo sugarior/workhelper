@@ -161,6 +161,25 @@ export function deleteEntry(database: DatabaseSync, id: string): void {
   softDeleteOrThrow(database, ENTRIES, '资料入口', id);
 }
 
+/**
+ * 资料被软删除时，把它下面的入口一并软删除。
+ *
+ * 为什么要级联：入口离开资料没有任何意义，而且**留着会让它继续被算作有效内容** ——
+ * `listOrphanArchives` / `countValidLinks` 只看 archive_items 是否活动，
+ * 于是一条已删除的资料仍会显示"有入口、有挂靠"，看起来像条正常资料。
+ * `archive_entries` 是子表关系（`archive_id` 一直是 NOT NULL），
+ * 因此父行不在了，子行就不该是活动状态。
+ */
+export function deleteEntriesForArchive(database: DatabaseSync, archiveId: string): number {
+  const result = execute(
+    database,
+    `UPDATE ${ENTRIES} SET deleted_at = ? WHERE archive_id = ? AND deleted_at IS NULL`,
+    nowIso(),
+    archiveId,
+  );
+  return result.changes;
+}
+
 /** 按 id 顺序重排入口：第 n 个的 sort_order = n+1。用于"按常用程度排序" */
 export function reorderEntries(database: DatabaseSync, archiveId: string, orderedIds: readonly string[]): void {
   const now = nowIso();
@@ -271,12 +290,19 @@ export function listLinksForArchives(database: DatabaseSync, archiveIds: readonl
   return grouped;
 }
 
-/** 某个任务/项目上挂着的全部资料 */
+/**
+ * 某个任务/项目上挂着的全部资料。
+ *
+ * JOIN 上 `archive_items` 并排除已软删除的资料：只查挂靠表会**返回已删除资料的行**，
+ * 于是任务详情里会出现一条点不开的资料（撤销转出后就踩到了这个）。
+ */
 export function listArchivesLinkedTo(database: DatabaseSync, targetType: MaterialLinkType, targetId: string): string[] {
   const rows = queryAll<{ archive_id: string }>(
     database,
-    `SELECT archive_id FROM ${LINKS} WHERE target_type = ? AND target_id = ?
-     ORDER BY created_at DESC`,
+    `SELECT l.archive_id FROM ${LINKS} l
+     JOIN archive_items a ON a.id = l.archive_id AND a.deleted_at IS NULL
+     WHERE l.target_type = ? AND l.target_id = ?
+     ORDER BY l.created_at DESC`,
     targetType,
     targetId,
   );
@@ -308,26 +334,31 @@ export function listOrphanArchives(database: DatabaseSync): string[] {
        AND NOT EXISTS (
          SELECT 1 FROM ${LINKS} l
          WHERE l.archive_id = a.id
-           AND (
-             (l.target_type = 'task'    AND l.target_id IN (SELECT id FROM tasks)) OR
-             (l.target_type = 'project' AND l.target_id IN (SELECT id FROM projects))
-           )
+           AND (${LIVE_TASK_LINK} OR ${LIVE_PROJECT_LINK})
        )
      ORDER BY a.created_at DESC`,
   );
   return rows.map((row) => row.id);
 }
 
-/** 有效挂靠数（只算指向真实对象的），未挂靠判定与它一致 */
+/**
+ * 有效挂靠：目标**真实存在且未被删除**。
+ *
+ * 这里的子查询必须带 `deleted_at IS NULL`：最初写的是 `IN (SELECT id FROM tasks)`，
+ * 于是指向"已软删除任务"的挂靠行仍被算作有效 —— 一条资料会看起来有着落，
+ * 点进去却什么都没有。删除任务时 exec 会调 pruneDanglingLinks 清掉一部分，
+ * 但那是软删除，行还在，因此**判定必须自己带条件**，不能依赖清理。
+ */
+const LIVE_TASK_LINK = `(l.target_type = 'task'    AND l.target_id IN (SELECT id FROM tasks    WHERE deleted_at IS NULL))`;
+const LIVE_PROJECT_LINK = `(l.target_type = 'project' AND l.target_id IN (SELECT id FROM projects WHERE deleted_at IS NULL))`;
+
+/** 有效挂靠数（只算指向真实且未删除对象的），未挂靠判定与它口径一致 */
 export function countValidLinks(database: DatabaseSync, archiveId: string): number {
   const row = queryOne<{ c: number }>(
     database,
     `SELECT COUNT(*) AS c FROM ${LINKS} l
      WHERE l.archive_id = ?
-       AND (
-         (l.target_type = 'task'    AND l.target_id IN (SELECT id FROM tasks)) OR
-         (l.target_type = 'project' AND l.target_id IN (SELECT id FROM projects))
-       )`,
+       AND (${LIVE_TASK_LINK} OR ${LIVE_PROJECT_LINK})`,
     archiveId,
   );
   return Number(row?.c ?? 0);

@@ -67,6 +67,13 @@ const ALLOWED: Readonly<Record<string, readonly string[]>> = {
     'focus', 'focusTask', 'unfocus', 'noteOnFocus', 'focusCandidates'],
   journal: ['summarize', 'save'],
   search: ['search'],
+  /**
+   * 资料（F-11~F-14）。
+   *
+   * `create` 把「入口 + 挂靠目标」放在**同一次调用**里，而不是"先建资料再挂靠"——
+   * 后者会短暂存在一条违反 M1 的零挂靠资料，且中途失败就留下孤儿。
+   */
+  material: ['create', 'get', 'list', 'listForTarget', 'update', 'link', 'unlink', 'remove', 'entryTargets'],
   system: ['getSettings', 'backup', 'integrityCheck', 'parseDueInput',
     'trashOverview', 'restoreIgnored', 'purgeIgnored', 'restoreTrash', 'purgeTrash'],
 };
