@@ -49,6 +49,7 @@ export const api = {
   classify: (id, target) => call('capture', 'classify', [id, target]),
   classifyMany: (ids, target) => call('capture', 'classifyMany', [ids, target]),
   undoLastClassification: () => call('capture', 'undoLastClassification'),
+  deleteItem: (id) => call('capture', 'deleteItem', id),
 
   // ---------- 规划 ----------
   listProjects: (options = {}) => call('planning', 'listProjects', options),

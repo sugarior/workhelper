@@ -7,14 +7,14 @@ import type { DatabaseSync } from 'node:sqlite';
 import { withTx } from '../db/index.ts';
 import {
   archiveInboxItem, countPendingInbox, createArchive, createInboxItem, createProject, createTask,
-  deleteArchive, deleteProject, deleteTask, getInboxItem, listPendingInbox, markConverted,
-  getDayBoundaryHour, getSetting, setSetting,
+  deleteArchive, deleteInboxItem, deleteProject, deleteTask, getInboxItem, listPendingInbox,
+  markConverted, getDayBoundaryHour, getSetting, setSetting,
 } from '../repo/index.ts';
 import { parseDate, stripParsedDate } from '../day/parseDate.ts';
 import { createIndexer } from './indexer.ts';
 import { dayKeyFromIso, nowIso } from '../domain/clock.ts';
 import { todayKey } from '../day/dayKey.ts';
-import { InvalidTransitionError } from '../domain/errors.ts';
+import { InvalidTransitionError, NotFoundError } from '../domain/errors.ts';
 import type { ArchiveKind, EntityType, InboxItem, InboxKindHint, Task } from '../domain/types.ts';
 import type { ParsedDate } from '../day/parseDate.ts';
 
@@ -97,6 +97,8 @@ export interface CaptureService {
   classifyMany(ids: string[], target: ClassifyTarget): ClassifyResult[];
   undoLastClassification(): boolean;
   lastUndoAt(): string | null;
+  /** 删除收件箱条目（误录纠正，进回收站）。与"丢弃"语义不同，见实现处注释 */
+  deleteItem(id: string): void;
 }
 
 export function createCaptureService(database: DatabaseSync): CaptureService {
@@ -262,6 +264,22 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
 
         writeUndo(null);
         return true;
+      });
+    },
+
+    /**
+     * 删除收件箱条目（误录纠正），进回收站，可恢复。
+     *
+     * 与「丢弃」的区别（需求 F-04）：丢弃是"这条是垃圾，已处理完毕"，
+     * 状态转为 archived 且不再出现；删除是"我根本不该记它"，属纠正操作。
+     * 两者都保留数据，但语义与后续可见性不同。
+     */
+    deleteItem(id) {
+      withTx(database, () => {
+        const item = getInboxItem(database, id);
+        if (item === undefined) throw new NotFoundError(`收件箱条目不存在：${id}`);
+        deleteInboxItem(database, id);
+        indexer.remove('inbox', id);
       });
     },
 

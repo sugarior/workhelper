@@ -108,6 +108,40 @@ nav.tabs button.active { background: var(--accent-soft); color: var(--accent); f
 /* 有逾期任务时的未结束计数：用颜色陈述事实，不做动画催促 */
 .badge.alert { background: var(--danger); }
 
+/* ---------- 「更多 ▾」下拉菜单 ---------- */
+/* 低频动作收进菜单，主按钮保持一眼可辨。每个菜单项带一行说明，
+   因为「丢弃 / 删除 / 转项目」语义相近，只靠名字容易点错。 */
+.menu { position: relative; display: inline-block; }
+.menu-trigger { white-space: nowrap; }
+.menu-panel {
+  display: none;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  min-width: 260px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+.menu.open .menu-panel { display: block; }
+.menu-item {
+  display: block;
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: 6px;
+  white-space: normal;
+}
+.menu-item:hover { background: var(--accent-soft); }
+.menu-item.danger .menu-label { color: var(--danger); }
+.menu-label { display: block; font-weight: 600; }
+.menu-hint { display: block; color: var(--text-dim); font-size: 12px; line-height: 1.4; margin-top: 2px; }
+
 .search-box { margin-left: auto; display: flex; gap: 6px; align-items: center; }
 .search-box input { width: 200px; }
 

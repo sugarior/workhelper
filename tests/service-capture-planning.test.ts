@@ -241,6 +241,31 @@ test('分类：条目不存在时报错', () => {
   });
 });
 
+test('删除收件箱条目：进回收站，与"丢弃"语义不同', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    const toDiscard = capture.quickCapture({ text: '这条是垃圾' }).item;
+    const toDelete = capture.quickCapture({ text: '这条我根本不该记' }).item;
+
+    capture.classify(toDiscard.id, { kind: 'discard' });
+    capture.deleteItem(toDelete.id);
+
+    assert.equal(capture.countPending(), 0, '两条都不再待处理');
+    // 丢弃：状态转为 archived，不是删除，因此回收站里没有它
+    assert.equal(getInboxItem(database, toDiscard.id)?.status, 'archived');
+    assert.equal(getInboxItem(database, toDiscard.id)?.deletedAt, null, '丢弃不是删除');
+    // 删除：软删除，回收站里能找回
+    assert.equal(getInboxItem(database, toDelete.id), undefined, '删除后活动视图不可见');
+  });
+});
+
+test('删除收件箱条目：不存在的 id 报 NotFoundError', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    assert.throws(() => capture.deleteItem('nope'), /收件箱条目不存在/);
+  });
+});
+
 test('项目：创建后能取出完整树结构', () => {
   useDb((database) => {
     const planning = createPlanningService(database);

@@ -57,7 +57,8 @@ export interface ServerOptions {
  * 日后加接口时再逐个补白名单，比事后收紧容易得多。
  */
 const ALLOWED: Readonly<Record<string, readonly string[]>> = {
-  capture: ['quickCapture', 'listPending', 'countPending', 'classify', 'classifyMany', 'undoLastClassification'],
+  capture: ['quickCapture', 'listPending', 'countPending', 'classify', 'classifyMany',
+    'undoLastClassification', 'deleteItem'],
   planning: ['listProjects', 'projectTree', 'createProject', 'deleteProject',
     'listTasks', 'createTask', 'completeTask', 'reopenTask',
     'createSubtask', 'setSubtaskStatus', 'reorder'],

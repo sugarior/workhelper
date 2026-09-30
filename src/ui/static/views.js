@@ -23,6 +23,61 @@ async function reload() {
 // 收件箱（F-04）
 // ============================================================
 
+/**
+ * 「更多 ▾」下拉菜单。
+ *
+ * 为什么把低频动作收进来（用户确认的界面方案 ②）：主路径必须零思考，
+ * 而 `转项目` / `删除` / `撤销` 都是一天用不到几次的动作。
+ * 把它们与主按钮并列会让"转任务"不再一眼可辨。
+ *
+ * 每个菜单项**必须带一行说明**（F-04 的交互要求）：这几个动作语义相近
+ * （丢弃 / 删除 / 转项目），只靠名字容易点错。
+ *
+ * @param entries [{ label, hint, danger?, run }]
+ */
+function moreMenu(entries) {
+  const panel = el('div', { class: 'menu-panel' }, entries.map((entry) => el('button', {
+    class: `menu-item ${entry.danger === true ? 'danger' : ''}`,
+    onclick: (event) => {
+      close();
+      void entry.run(event.target);
+    },
+  }, [
+    el('span', { class: 'menu-label' }, entry.label),
+    el('span', { class: 'menu-hint' }, entry.hint),
+  ])));
+
+  const wrapper = el('div', { class: 'menu' }, [
+    el('button', {
+      class: 'menu-trigger',
+      title: '更多处理方式',
+      onclick: (event) => {
+        event.stopPropagation();
+        wrapper.classList.toggle('open');
+      },
+    }, '更多 ▾'),
+    panel,
+  ]);
+
+  function close() {
+    wrapper.classList.remove('open');
+  }
+
+  // 点别处收起：菜单是绝对定位浮层，不收起会挡住在下面的条目
+  document.addEventListener('click', close);
+  return wrapper;
+}
+
+/** 转项目前的确认：说明"这一条会变成什么"，避免与"转任务"混淆 */
+function confirmAsProject(title) {
+  return window.confirm(
+    `把「${title}」变成一个新项目？\n\n` +
+    '· 项目名就用这行文字\n' +
+    '· 不会自动生成任务 —— 之后在「项目」页里逐步拆解\n' +
+    '· 选错了可以点「更多 ▾ → 撤销上一次分类」还原',
+  );
+}
+
 export async function renderInbox(root) {
   const [items, projects] = await Promise.all([api.listPending({ limit: 200 }), api.listProjects()]);
 
@@ -61,6 +116,45 @@ export async function renderInbox(root) {
     });
   }
 
+  /** 批量转项目：多选时逐条确认太累，用一次确认说明会影响几条 */
+  async function classifyAsProject(button) {
+    const ids = selected.size > 0 ? [...selected] : [];
+    if (ids.length === 0) {
+      flash('请先勾选要处理的条目', 'error');
+      return;
+    }
+    const what = ids.length === 1
+      ? `把「${items.find((item) => item.id === ids[0])?.body ?? ''}」变成一个新项目？`
+      : `把勾选的 ${ids.length} 条各变成一个项目？`;
+    if (!window.confirm(
+      `${what}\n\n` +
+      '· 每条的原文就是项目名\n' +
+      '· 不会自动生成任务 —— 之后在「项目」页里逐步拆解\n' +
+      '· 选错了可以点「更多 ▾ → 撤销上一次分类」还原',
+    )) return;
+
+    await withBusy(button, async () => {
+      if (ids.length === 1) await api.classify(ids[0], { kind: 'project' });
+      else await api.classifyMany(ids, { kind: 'project' });
+      flash(`已建 ${ids.length} 个项目`);
+      await reload();
+    });
+  }
+
+  async function deleteSelected(button) {
+    const ids = selected.size > 0 ? [...selected] : [];
+    if (ids.length === 0) {
+      flash('请先勾选要处理的条目', 'error');
+      return;
+    }
+    if (!window.confirm(`删除勾选的 ${ids.length} 条？\n\n进回收站，可恢复。`)) return;
+    await withBusy(button, async () => {
+      for (const id of ids) await api.deleteItem(id);
+      flash(`已删除 ${ids.length} 条`);
+      await reload();
+    });
+  }
+
   const taskTarget = () => {
     const projectId = projectPicker.value === '' ? null : projectPicker.value;
     return projectId === null ? { kind: 'task' } : { kind: 'task', projectId };
@@ -76,15 +170,28 @@ export async function renderInbox(root) {
       class: 'danger',
       onclick: (event) => void classifySelected({ kind: 'discard' }, event.target),
     }, '丢弃'),
-    el('span', { class: 'spacer' }),
-    el('button', {
-      title: '撤销上一次分类',
-      onclick: (event) => void withBusy(event.target, async () => {
-        const done = await api.undoLastClassification();
-        flash(done ? '已撤销上一次分类' : '没有可撤销的操作', done ? 'ok' : 'error');
-        await reload();
-      }),
-    }, '撤销'),
+    moreMenu([
+      {
+        label: '转项目',
+        hint: '这一条本身就是一件事，之后在项目页里拆解',
+        run: (button) => classifyAsProject(button),
+      },
+      {
+        label: '删除',
+        hint: '我根本不该记它 —— 进回收站，可恢复',
+        danger: true,
+        run: (button) => deleteSelected(button),
+      },
+      {
+        label: '撤销上一次分类',
+        hint: '把上一次转出的东西还原回收件箱',
+        run: (button) => withBusy(button, async () => {
+          const done = await api.undoLastClassification();
+          flash(done ? '已撤销上一次分类' : '没有可撤销的操作', done ? 'ok' : 'error');
+          await reload();
+        }),
+      },
+    ]),
   ]);
 
   const rows = items.map((item) => {
@@ -129,6 +236,29 @@ export async function renderInbox(root) {
             await reload();
           }),
         }, '丢弃'),
+        moreMenu([
+          {
+            label: '转项目',
+            hint: '这一条本身就是一件事',
+            run: (button) => withBusy(button, async () => {
+              if (!confirmAsProject(item.body)) return;
+              await api.classify(item.id, { kind: 'project' });
+              flash('已建项目，去「项目」页拆解');
+              await reload();
+            }),
+          },
+          {
+            label: '删除',
+            hint: '我根本不该记它 —— 进回收站',
+            danger: true,
+            run: (button) => withBusy(button, async () => {
+              if (!window.confirm(`删除「${item.body}」？\n\n进回收站，可恢复。`)) return;
+              await api.deleteItem(item.id);
+              flash('已删除');
+              await reload();
+            }),
+          },
+        ]),
       ]),
     ]);
   });
