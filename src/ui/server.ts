@@ -67,7 +67,8 @@ const ALLOWED: Readonly<Record<string, readonly string[]>> = {
     'focus', 'focusTask', 'unfocus', 'noteOnFocus', 'focusCandidates'],
   journal: ['summarize', 'save'],
   search: ['search'],
-  system: ['getSettings', 'backup', 'integrityCheck', 'parseDueInput'],
+  system: ['getSettings', 'backup', 'integrityCheck', 'parseDueInput',
+    'trashOverview', 'restoreDiscarded', 'purgeDiscarded', 'restoreTrash', 'purgeTrash'],
 };
 
 function sendJson(response: ServerResponse, status: number, payload: unknown): void {

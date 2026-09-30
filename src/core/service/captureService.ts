@@ -273,11 +273,21 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
      * 与「丢弃」的区别（需求 F-04）：丢弃是"这条是垃圾，已处理完毕"，
      * 状态转为 archived 且不再出现；删除是"我根本不该记它"，属纠正操作。
      * 两者都保留数据，但语义与后续可见性不同。
+     *
+     * **守卫（硬规则 D1）**：只允许删除**待处理**的条目。
+     * 已处理（已转出 / 已丢弃）的条目删除等于抹掉处理痕迹 ——
+     * 要撤销就用「撤销上一次分类」，要清垃圾就用「丢弃」。
      */
     deleteItem(id) {
       withTx(database, () => {
         const item = getInboxItem(database, id);
         if (item === undefined) throw new NotFoundError(`收件箱条目不存在：${id}`);
+        if (item.status !== 'pending') {
+          const what = item.status === 'converted' ? '已转出' : '已丢弃';
+          throw new InvalidTransitionError(
+            `${what}的条目不能删除（那会抹掉处理痕迹）。要撤销请用「撤销上一次分类」。`,
+          );
+        }
         deleteInboxItem(database, id);
         indexer.remove('inbox', id);
       });

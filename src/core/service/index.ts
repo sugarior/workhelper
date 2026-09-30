@@ -57,3 +57,4 @@ export type { TrackingService, TodayView, OpenTasksView } from './trackingServic
 export type { JournalService, JournalSummary, CompletedSubtask } from './journalService.ts';
 export type { SearchService, ResolvedHit } from './searchService.ts';
 export type { SystemService, BackupFile, IntegrityReport } from './systemService.ts';
+export type { TrashEntry, DiscardedEntry } from '../repo/trashRepo.ts';

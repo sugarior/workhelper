@@ -68,6 +68,14 @@ export const api = {
   /** 解析手工输入的截止日期；看不懂返回 null，绝不静默存错 */
   parseDueInput: (raw) => call('system', 'parseDueInput', raw),
 
+  // ---------- 回收站（F-21b） ----------
+  // 一次拿到「已删除」与「已丢弃」两个筛选的列表与计数，省掉四次往返。
+  trashOverview: () => call('system', 'trashOverview'),
+  restoreDiscarded: (id) => call('system', 'restoreDiscarded', id),
+  purgeDiscarded: (id) => call('system', 'purgeDiscarded', id),
+  restoreTrash: (entityType, entityId) => call('system', 'restoreTrash', [entityType, entityId]),
+  purgeTrash: (entityType, entityId) => call('system', 'purgeTrash', [entityType, entityId]),
+
   // ---------- 推进 ----------
   todayView: (dayKey) => call('tracking', 'todayView', dayKey === undefined ? [] : [dayKey]),
   openTasksView: (dayKey) => call('tracking', 'openTasksView', dayKey === undefined ? [] : [dayKey]),

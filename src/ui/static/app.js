@@ -4,7 +4,7 @@
 import { api } from '/api.js';
 import { el, mount, shortId, flash } from '/dom.js';
 import {
-  renderInbox, renderAll, renderToday, renderProjects, renderLog,
+  renderInbox, renderAll, renderToday, renderProjects, renderLog, renderTrash,
   renderFocusBar, focusNoteInput, setRefreshHook,
 } from '/views.js';
 
@@ -14,6 +14,8 @@ const inboxBadge = document.getElementById('badge-inbox');
 const openBadge = document.getElementById('badge-open');
 const focusBar = document.getElementById('focus-bar');
 const searchInput = document.getElementById('search');
+const trashCount = document.getElementById('trash-count');
+const trashButton = document.getElementById('open-trash');
 
 const RENDERERS = {
   inbox: renderInbox,
@@ -21,6 +23,9 @@ const RENDERERS = {
   today: renderToday,
   projects: renderProjects,
   log: renderLog,
+  // 回收站不是页签而是右上角入口（需求 F-21b：低频、偏系统，不占主导航）。
+  // 但它仍然是一条"当前显示哪一页"的路由，所以放在同一张表里。
+  trash: renderTrash,
 };
 
 /** 当前页签；页面刷新后丢失是可以接受的，不值得为它引入持久化 */
@@ -56,6 +61,16 @@ async function refreshBadges() {
   } catch {
     openBadge.classList.add('zero');
   }
+
+  // 回收站入口带数量：里面攒着东西却不显示，等于又造了一个"看不见的黑洞"
+  try {
+    const overview = await api.trashOverview();
+    const total = overview.counts.deleted + overview.counts.discarded;
+    trashCount.textContent = String(total);
+    trashCount.classList.toggle('zero', total === 0);
+  } catch {
+    trashCount.classList.add('zero');
+  }
 }
 
 async function render(tab) {
@@ -84,6 +99,17 @@ tabsBox.addEventListener('click', (event) => {
 
 document.getElementById('quick-capture').addEventListener('click', () => {
   window.open('/capture', 'wh-capture', 'width=680,height=330,menubar=no,toolbar=no');
+});
+
+// 回收站入口（需求 F-21b）：右上角，与页签同一行但不占页签位。
+// 再点一次回到来之前那一页 —— 它是"去看一眼"，不是"换一个工作区"。
+let tabBeforeTrash = 'inbox';
+trashButton.addEventListener('click', () => {
+  if (currentTab === 'trash') void render(tabBeforeTrash);
+  else {
+    tabBeforeTrash = currentTab;
+    void render('trash');
+  }
 });
 
 // ---------- 全局搜索 ----------

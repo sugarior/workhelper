@@ -259,6 +259,33 @@ test('删除收件箱条目：进回收站，与"丢弃"语义不同', () => {
   });
 });
 
+test('删除守卫：已处理的条目不能删除，只能丢弃或撤销（硬规则 D1）', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+
+    // 已转出的条目
+    const converted = capture.quickCapture({ text: '已转成任务的' }).item;
+    capture.classify(converted.id, { kind: 'task' });
+    assert.throws(
+      () => capture.deleteItem(converted.id),
+      /已转出的条目不能删除/,
+      '删除已转出的条目等于抹掉处理痕迹，必须拒绝',
+    );
+    assert.notEqual(getInboxItem(database, converted.id), undefined, '拒绝后条目必须还在');
+    assert.equal(getInboxItem(database, converted.id)?.deletedAt, null);
+
+    // 已丢弃的条目
+    const discarded = capture.quickCapture({ text: '已丢弃的' }).item;
+    capture.classify(discarded.id, { kind: 'discard' });
+    assert.throws(() => capture.deleteItem(discarded.id), /已丢弃的条目不能删除/);
+
+    // 待处理的条目可以删（这才是"误录纠正"）
+    const pending = capture.quickCapture({ text: '我根本不该记它' }).item;
+    assert.doesNotThrow(() => capture.deleteItem(pending.id));
+    assert.equal(getInboxItem(database, pending.id), undefined, '删除后活动视图不可见');
+  });
+});
+
 test('删除收件箱条目：不存在的 id 报 NotFoundError', () => {
   useDb((database) => {
     const capture = createCaptureService(database);

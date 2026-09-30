@@ -1110,6 +1110,134 @@ export function focusNoteInput() {
   return true;
 }
 
+// ============================================================
+// 回收站（F-21b）
+// ============================================================
+
+/**
+ * 回收站页面：两个**语义不同**的筛选，刻意不混成一条列表。
+ *
+ * | | 已删除 | 已丢弃 |
+ * |---|---|---|
+ * | 我做了什么 | 我根本不该记它（误录纠正） | 这条是垃圾（主动判断） |
+ * | 数据 | `deleted_at` 有值 | `status='archived'`，`deleted_at` 仍为 NULL |
+ * | 保留 | 30 天自动清理 | **不过期**（自动删除等于悄悄抹掉我的判断） |
+ * | 取回为 | 恢复原样 | 放回待处理 |
+ *
+ * 页面内保留当前筛选，切走再回来不会跳回默认项。
+ */
+let trashTab = 'deleted';
+
+export async function renderTrash(root) {
+  const overview = await api.trashOverview();
+  const { counts, retentionDays } = overview;
+
+  const switcher = el('div', { class: 'toolbar' }, [
+    el('button', {
+      class: trashTab === 'deleted' ? 'primary' : '',
+      onclick: () => { trashTab = 'deleted'; void reload(); },
+    }, `已删除（${counts.deleted}）`),
+    el('button', {
+      class: trashTab === 'discarded' ? 'primary' : '',
+      onclick: () => { trashTab = 'discarded'; void reload(); },
+    }, `已丢弃（${counts.discarded}）`),
+  ]);
+
+  const rows = trashTab === 'deleted'
+    ? renderDeletedRows(overview.deleted, retentionDays, reload)
+    : renderDiscardedRows(overview.discarded, reload);
+
+  const explain = trashTab === 'deleted'
+    ? `误录纠正进这里，保留 ${retentionDays} 天后自动清理。恢复即回到原样。`
+    : '「丢弃」是我主动做的判断，所以**不会自动过期**，也仍然能被搜索到。放回待处理即可继续整理。';
+
+  mount(root, [
+    el('h2', {}, '回收站'),
+    switcher,
+    el('div', { class: 'item-raw' }, explain),
+    rows,
+  ]);
+}
+
+function renderDeletedRows(entries, retentionDays, onChanged) {
+  if (entries.length === 0) {
+    return el('div', { class: 'empty' }, '没有已删除的内容（误删的东西会出现在这里）。');
+  }
+  return el('ul', { class: 'list' }, entries.map((entry) => el('li', {}, [
+    el('div', { class: 'item-body' }, [
+      el('div', { class: 'item-title' }, entry.title === '' ? '（无标题）' : entry.title),
+      el('div', { class: 'item-meta' }, [
+        el('span', { class: 'tag' }, entry.label),
+        el('span', { class: 'item-raw' }, `还剩 ${entry.daysLeft} 天`),
+        el('span', {}, shortId(entry.entityId)),
+      ]),
+    ]),
+    el('div', { class: 'row-actions' }, [
+      el('button', {
+        onclick: (event) => void withBusy(event.target, async () => {
+          await api.restoreTrash(entry.entityType, entry.entityId);
+          flash('已恢复');
+          await onChanged();
+        }),
+      }, '恢复'),
+      el('button', {
+        class: 'danger',
+        onclick: (event) => void withBusy(event.target, async () => {
+          // 全系统唯一不可逆操作：必须二次确认，且说明不可恢复
+          if (!window.confirm(
+            `彻底删除「${entry.title}」？\n\n` +
+            '· 这是物理删除，**无法恢复**\n' +
+            '· 若只是想让它消失，什么都不用做 —— ' +
+            `${retentionDays} 天后会自动清理`,
+          )) return;
+          await api.purgeTrash(entry.entityType, entry.entityId);
+          flash('已彻底删除');
+          await onChanged();
+        }),
+      }, '彻底删除'),
+    ]),
+  ])));
+}
+
+function renderDiscardedRows(entries, onChanged) {
+  if (entries.length === 0) {
+    return el('div', { class: 'empty' }, '没有已丢弃的内容。丢弃的条目会一直留在这里，不会被自动清掉。');
+  }
+  return el('ul', { class: 'list' }, entries.map((entry) => el('li', {}, [
+    el('div', { class: 'item-body' }, [
+      el('div', { class: 'item-title' }, entry.title),
+      el('div', { class: 'item-meta' }, [
+        el('span', { class: 'tag' }, '已丢弃'),
+        entry.rawInput === null ? null : el('span', { class: 'item-raw' }, `原文：${entry.rawInput}`),
+        el('span', { class: 'item-raw' }, '不过期'),
+      ]),
+    ]),
+    el('div', { class: 'row-actions' }, [
+      el('button', {
+        title: '把这条放回收件箱继续整理',
+        onclick: (event) => void withBusy(event.target, async () => {
+          await api.restoreDiscarded(entry.id);
+          flash('已放回待处理');
+          await onChanged();
+        }),
+      }, '放回待处理'),
+      el('button', {
+        class: 'danger',
+        onclick: (event) => void withBusy(event.target, async () => {
+          if (!window.confirm(
+            `彻底删除「${entry.title}」？\n\n` +
+            '· 这是物理删除，**无法恢复**\n' +
+            '· 若只是不想让它占地方，其实可以留着 —— 丢弃的内容不过期，也还能被搜到',
+          )) return;
+          await api.purgeDiscarded(entry.id);
+          flash('已彻底删除');
+          await onChanged();
+        }),
+      }, '彻底删除'),
+    ]),
+  ])));
+}
+
 export async function renderLog(root) {
   const dayKey = todayDayKey();
   const dateInput = el('input', { type: 'date', value: dayKey });
