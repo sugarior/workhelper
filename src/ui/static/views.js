@@ -791,6 +791,15 @@ function buildTaskRow(task, dayKey, extraTag, onChanged) {
     el('div', { class: 'item-body' }, [
       el('div', { class: 'item-title' }, task.title),
       tags.length > 0 ? el('div', { class: 'item-meta' }, tags) : null,
+      // 资料折叠行（F-14）。
+      //
+      // 加在**共享的任务行**里而不是各页各加一次：`buildTaskRow` 同时供
+      // 「全部」与「今日」使用，加在这里一处覆盖两页。
+      // 最初只加在「项目」页，于是从这两个主要列表里都看不到任务的资料 ——
+      // 那等于这个功能在用户最常看的地方不存在。
+      //
+      // 折叠是硬要求：任务详情不能因为资料多而变长。
+      materialFoldRow('task', task.id),
       progressBox,
     ]),
     el('div', { class: 'row-actions' }, actions),
