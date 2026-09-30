@@ -137,7 +137,7 @@ export function markConverted(database: DatabaseSync, id: string, convertedTo: s
   return updated;
 }
 
-/** 丢弃：判定为垃圾，无需转成任何对象 */
+/** 忽略：判定为"我不要这条"，无需转成任何对象 */
 export function archiveInboxItem(database: DatabaseSync, id: string): void {
   const changed = execute(
     database,
@@ -148,7 +148,32 @@ export function archiveInboxItem(database: DatabaseSync, id: string): void {
   if (changed.changes === 0) throw new NotFoundError(`收件箱条目不存在：${id}`);
 }
 
-/** 软删除：仅在纠正误录时使用；常规清空应走"丢弃"（archived） */
+/**
+ * 把条目恢复成"已转出"状态 —— 撤销"忽略一条已转出的条目"时用。
+ *
+ * 为什么需要它：`ignore` 现在也能作用于已转出的条目（需求 F-04 修订后
+ * 收件箱只保留一个"我不要它"的动作）。撤销时必须还原成**已转出**
+ * 而不是放回待处理 —— 否则收件箱会多出一条本该已处理的记录。
+ * `converted_to` 保持不动：它是"我把它转成了什么"的痕迹。
+ */
+export function restoreConverted(database: DatabaseSync, id: string): void {
+  const changed = execute(
+    database,
+    `UPDATE inbox_items SET status = 'converted', updated_at = ?
+     WHERE id = ? AND status = 'archived' AND deleted_at IS NULL`,
+    nowIso(),
+    id,
+  );
+  if (changed.changes === 0) throw new NotFoundError(`没有可恢复为"已转出"的条目：${id}`);
+}
+
+/**
+ * 软删除（保留给历史数据与回收站的「已删除」筛选）。
+ *
+ * **不再是界面的动作**：需求 F-04 修订后收件箱只有「忽略」一个"我不要它"的动作，
+ * 因为它与"丢弃"的用户决策完全相同，区分只是把实现差异泄漏给了用户。
+ * 保留此函数是为了让库里历史软删除的行仍能被恢复。
+ */
 export function deleteInboxItem(database: DatabaseSync, id: string): void {
   softDeleteOrThrow(database, 'inbox_items', '收件箱条目', id);
 }

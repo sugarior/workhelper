@@ -241,55 +241,87 @@ test('分类：条目不存在时报错', () => {
   });
 });
 
-test('删除收件箱条目：进回收站，与"丢弃"语义不同', () => {
+test('忽略：待处理的条目被忽略后不再待处理，数据仍在（可放回）', () => {
   useDb((database) => {
     const capture = createCaptureService(database);
-    const toDiscard = capture.quickCapture({ text: '这条是垃圾' }).item;
-    const toDelete = capture.quickCapture({ text: '这条我根本不该记' }).item;
+    const item = capture.quickCapture({ text: '我不要这条' }).item;
+    assert.equal(capture.countPending(), 1);
 
-    capture.classify(toDiscard.id, { kind: 'discard' });
-    capture.deleteItem(toDelete.id);
-
-    assert.equal(capture.countPending(), 0, '两条都不再待处理');
-    // 丢弃：状态转为 archived，不是删除，因此回收站里没有它
-    assert.equal(getInboxItem(database, toDiscard.id)?.status, 'archived');
-    assert.equal(getInboxItem(database, toDiscard.id)?.deletedAt, null, '丢弃不是删除');
-    // 删除：软删除，回收站里能找回
-    assert.equal(getInboxItem(database, toDelete.id), undefined, '删除后活动视图不可见');
+    capture.ignoreItem(item.id);
+    assert.equal(capture.countPending(), 0, '忽略后不再待处理');
+    // 忽略不是删除：行还在，状态是 archived，因此能被"放回待处理"
+    assert.equal(getInboxItem(database, item.id)?.status, 'archived');
+    assert.equal(getInboxItem(database, item.id)?.deletedAt, null, '忽略不是删除');
+    assert.notEqual(getInboxItem(database, item.id), undefined, '数据必须还在');
   });
 });
 
-test('删除守卫：已处理的条目不能删除，只能丢弃或撤销（硬规则 D1）', () => {
+test('忽略：可以作用于已转出的条目，且**不影响任务本身**', () => {
   useDb((database) => {
     const capture = createCaptureService(database);
+    const item = capture.quickCapture({ text: '这条已经转成任务了' }).item;
+    const result = capture.classify(item.id, { kind: 'task' });
+    assert.equal(listTasks(database).length, 1);
 
-    // 已转出的条目
-    const converted = capture.quickCapture({ text: '已转成任务的' }).item;
-    capture.classify(converted.id, { kind: 'task' });
-    assert.throws(
-      () => capture.deleteItem(converted.id),
-      /已转出的条目不能删除/,
-      '删除已转出的条目等于抹掉处理痕迹，必须拒绝',
-    );
-    assert.notEqual(getInboxItem(database, converted.id), undefined, '拒绝后条目必须还在');
-    assert.equal(getInboxItem(database, converted.id)?.deletedAt, null);
+    // 这是"收件箱只保留一个动作"之后新增的能力：
+    // 已转出的条目也能忽略 —— 那只是标记掉一行审计痕迹
+    capture.ignoreItem(item.id);
 
-    // 已丢弃的条目
-    const discarded = capture.quickCapture({ text: '已丢弃的' }).item;
-    capture.classify(discarded.id, { kind: 'discard' });
-    assert.throws(() => capture.deleteItem(discarded.id), /已丢弃的条目不能删除/);
-
-    // 待处理的条目可以删（这才是"误录纠正"）
-    const pending = capture.quickCapture({ text: '我根本不该记它' }).item;
-    assert.doesNotThrow(() => capture.deleteItem(pending.id));
-    assert.equal(getInboxItem(database, pending.id), undefined, '删除后活动视图不可见');
+    assert.equal(getInboxItem(database, item.id)?.status, 'archived');
+    assert.equal(getInboxItem(database, item.id)?.convertedTo, `task:${result.createdId}`,
+      'converted_to 必须保留，它是"这条转出过什么"的痕迹');
+    assert.equal(listTasks(database).length, 1, '任务绝不能因为收件箱条目被忽略而消失');
+    assert.equal(getTask(database, result.createdId)?.status, 'todo');
   });
 });
 
-test('删除收件箱条目：不存在的 id 报 NotFoundError', () => {
+test('忽略：幂等，重复点不报错', () => {
   useDb((database) => {
     const capture = createCaptureService(database);
-    assert.throws(() => capture.deleteItem('nope'), /收件箱条目不存在/);
+    const item = capture.quickCapture({ text: '重复忽略' }).item;
+    capture.ignoreItem(item.id);
+    assert.doesNotThrow(() => capture.ignoreItem(item.id));
+    assert.equal(getInboxItem(database, item.id)?.status, 'archived');
+  });
+});
+
+test('忽略：不存在的 id 报 NotFoundError', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    assert.throws(() => capture.ignoreItem('nope'), /收件箱条目不存在/);
+  });
+});
+
+test('撤销：忽略待处理的条目后，撤销把它放回待处理', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    const item = capture.quickCapture({ text: '忽略再撤销' }).item;
+    capture.ignoreItem(item.id);
+    assert.equal(capture.countPending(), 0);
+    assert.equal(canUndoClassification(database), true);
+
+    assert.equal(capture.undoLastClassification(), true);
+    // 它当初是待处理的，因此回到待处理（而不是"已转出"）
+    assert.equal(getInboxItem(database, item.id)?.status, 'pending');
+    assert.equal(capture.countPending(), 1);
+  });
+});
+
+test('撤销：忽略已转出的条目后，撤销把它还原成"已转出"而不是放回待处理', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    const item = capture.quickCapture({ text: '转出后又被忽略' }).item;
+    const result = capture.classify(item.id, { kind: 'task' });
+    capture.ignoreItem(item.id);
+    assert.equal(getInboxItem(database, item.id)?.status, 'archived');
+
+    assert.equal(capture.undoLastClassification(), true);
+    // 关键：它当初不是待处理的，撤销后也不该变成待处理 ——
+    // 否则收件箱会凭空多出一条本该已处理的记录
+    assert.equal(getInboxItem(database, item.id)?.status, 'converted');
+    assert.equal(capture.countPending(), 0);
+    // 忽略不影响任务，撤销忽略自然也不该动它
+    assert.equal(getTask(database, result.createdId)?.status, 'todo');
   });
 });
 

@@ -7,15 +7,16 @@ import type { DatabaseSync } from 'node:sqlite';
 import { withTx } from '../db/index.ts';
 import {
   archiveInboxItem, countPendingInbox, createArchive, createInboxItem, createProject, createTask,
-  deleteArchive, deleteInboxItem, deleteProject, deleteTask, getInboxItem, listPendingInbox,
-  markConverted, getDayBoundaryHour, getSetting, setSetting,
+  deleteArchive, deleteProject, deleteTask, getInboxItem, listPendingInbox,
+  markConverted, restoreConverted, getDayBoundaryHour, getSetting, setSetting,
 } from '../repo/index.ts';
 import { parseDate, stripParsedDate } from '../day/parseDate.ts';
 import { createIndexer } from './indexer.ts';
+import type { Indexer } from './indexer.ts';
 import { dayKeyFromIso, nowIso } from '../domain/clock.ts';
 import { todayKey } from '../day/dayKey.ts';
 import { InvalidTransitionError, NotFoundError } from '../domain/errors.ts';
-import type { ArchiveKind, EntityType, InboxItem, InboxKindHint, Task } from '../domain/types.ts';
+import type { ArchiveKind, EntityType, InboxItem, InboxKindHint, InboxStatus, Task } from '../domain/types.ts';
 import type { ParsedDate } from '../day/parseDate.ts';
 
 /** 分类目标：把一条收件箱碎片变成什么 */
@@ -53,24 +54,66 @@ export const CLASSIFY_RESULT_LABELS: Readonly<Record<'task' | 'project' | 'archi
   task: '任务',
   project: '项目',
   archive: '资料',
-  inbox: '已丢弃',
+  inbox: '已忽略',
 };
 
-/** 撤销日志：一次分类操作的全部影响，存在 settings 里，避免为此加表 */
+/**
+ * 撤销日志：一次操作的全部影响，存在 settings 里，避免为此加表。
+ *
+ * `ignored` 记录"被忽略时它原本是什么状态"，这是**撤销能否正确工作**的关键：
+ *  · 原本是 `pending` → 撤销只需把它放回待处理
+ *  · 原本是 `converted` → 撤销要把它**恢复成已转出**，而不是放回待处理
+ *    （否则收件箱会多出一条本该已处理的记录）
+ *
+ * 不带这个字段的是旧格式记录，按"全部放回待处理"处理（等价于旧行为）。
+ */
 interface UndoRecord {
   at: string;
-  /** 本次涉及的全部收件箱条目，撤销时放回待处理 */
+  /** 本次涉及的全部收件箱条目，撤销时恢复 */
   inboxIds: string[];
   /** 本次新建的实体，撤销时软删除 */
   created: { kind: CreatedKind; id: string }[];
+  /** 被忽略的条目及其忽略前的状态 */
+  ignored?: { id: string; prevStatus: InboxStatus }[];
 }
 
 const UNDO_SETTING_KEY = 'capture.undoLog';
 const MAX_UNDO_BATCH = 200;
 
 /**
+ * 忽略一条收件箱条目（"我不要这条"）。
+ *
+ * `classify` 的 `discard` 分支与 `ignoreItem` 共用这个实现 —— 它们是同一个动作的两个入口：
+ * 前者是"整理时顺手忽略"，后者是"对单条直接忽略"。**不能写成两套逻辑**，
+ * 否则两条路径的撤销记录、索引维护会逐渐分叉（本项目已因此栽过两次）。
+ *
+ * 放在模块层而不是某个 service 内部：两个调用方分属不同方法，
+ * 写成闭包里的私有函数反而要来回传参。
+ */
+function archiveAndTrack(
+  database: DatabaseSync,
+  id: string,
+  indexer: Indexer,
+  at: string,
+): void {
+  const item = getInboxItem(database, id);
+  if (item === undefined) throw new NotFoundError(`收件箱条目不存在：${id}`);
+  archiveInboxItem(database, id);
+  // 待处理的条目要从索引移除，否则搜出来点进去是空的；
+  // 已转出的条目留着（它对应的实体也在索引里，两者不冲突）。
+  if (item.status === 'pending') indexer.remove('inbox', id);
+  // 记下"忽略前是什么状态"，撤销时要靠它还原（见 undoLastClassification）
+  setSetting(database, UNDO_SETTING_KEY, {
+    at,
+    inboxIds: [id],
+    created: [],
+    ignored: [{ id, prevStatus: item.status }],
+  } satisfies UndoRecord);
+}
+
+/**
  * 从分类结果里挑出"本次新建的实体"，供撤销时反向清理。
- * 注意 discard 不在内：它不新建任何实体，只需把收件箱条目放回待处理。
+ * 注意 discard 不在内：它不新建任何实体，只改收件箱条目的状态。
  */
 function toCreatedRefs(results: readonly ClassifyResult[]): { kind: CreatedKind; id: string }[] {
   return results
@@ -97,8 +140,11 @@ export interface CaptureService {
   classifyMany(ids: string[], target: ClassifyTarget): ClassifyResult[];
   undoLastClassification(): boolean;
   lastUndoAt(): string | null;
-  /** 删除收件箱条目（误录纠正，进回收站）。与"丢弃"语义不同，见实现处注释 */
-  deleteItem(id: string): void;
+  /**
+   * 忽略收件箱条目 —— 收件箱**唯一**的"我不要这条"动作（F-04 修订）。
+   * 待处理与已转出的条目都能用；幂等。
+   */
+  ignoreItem(id: string): void;
 }
 
 export function createCaptureService(database: DatabaseSync): CaptureService {
@@ -131,7 +177,8 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
     }
 
     if (target.kind === 'discard') {
-      archiveInboxItem(database, id);
+      // 与 ignoreItem 共用同一个实现：它们是同一个动作的两个入口
+      archiveAndTrack(database, id, indexer, at);
       return { inboxId: id, createdKind: 'inbox', createdId: id };
     }
 
@@ -236,12 +283,24 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
     },
 
     /**
-     * 撤销上一次分类：把本次新建的实体软删除，并把收件箱条目放回待处理。
+     * 撤销上一次操作：把本次新建的实体软删除，并把收件箱条目恢复。
      * 只支持撤销最近一次，避免撤销栈带来的复杂度。
+     *
+     * 恢复成什么状态，取决于这次操作**是分类还是忽略**：
+     *  · 分类（本次新建了实体）→ 条目回到**待处理**，并清掉 `converted_to`
+     *    （它指向的实体刚被删掉，留着就是悬空引用）
+     *  · 忽略 → 条目回到**忽略前的状态**。若一律放回待处理，
+     *    收件箱会多出一条本该已处理的记录。
+     *
+     * 判据是 `record.created` 是否为空 —— 即"这次操作有没有转出新实体"。
+     * 也可以让 ignoreItem 写一条带 prevStatus 的记录来区分，
+     * 但那需要区分"哪条是刚转的、哪条是早就转过的"，反而更绕。
      */
     undoLastClassification() {
       const record = readUndo();
       if (record === null) return false;
+
+      const wasIgnoreOnly = record.created.length === 0;
 
       return withTx(database, () => {
         for (const entry of record.created) {
@@ -254,8 +313,23 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
         for (const inboxId of record.inboxIds) {
           const item = getInboxItem(database, inboxId);
           if (item === undefined) continue;
+
+          if (wasIgnoreOnly) {
+            // 忽略操作：还原成忽略前的状态。
+            // 这里**保留 converted_to** —— 它是"这条曾转出过什么"的痕迹，
+            // 也是下一次判断的依据。
+            const prev = (record.ignored ?? []).find((entry) => entry.id === inboxId)?.prevStatus;
+            if (prev === 'converted' && item.status === 'archived') restoreConverted(database, inboxId);
+            else if (prev === 'pending' && item.status === 'archived') {
+              database
+                .prepare(`UPDATE inbox_items SET status = 'pending', updated_at = ? WHERE id = ?`)
+                .run(nowIso(), inboxId);
+            }
+            continue;
+          }
+
+          // 分类操作：放回待处理，并清掉指向已被删除实体的 converted_to
           if (item.status === 'converted' || item.status === 'archived') {
-            // 放回待处理，并清掉指向已被删除实体的 converted_to
             database
               .prepare(`UPDATE inbox_items SET status = 'pending', converted_to = NULL, updated_at = ? WHERE id = ?`)
               .run(nowIso(), inboxId);
@@ -267,29 +341,27 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
       });
     },
 
-    /**
-     * 删除收件箱条目（误录纠正），进回收站，可恢复。
-     *
-     * 与「丢弃」的区别（需求 F-04）：丢弃是"这条是垃圾，已处理完毕"，
-     * 状态转为 archived 且不再出现；删除是"我根本不该记它"，属纠正操作。
-     * 两者都保留数据，但语义与后续可见性不同。
-     *
-     * **守卫（硬规则 D1）**：只允许删除**待处理**的条目。
-     * 已处理（已转出 / 已丢弃）的条目删除等于抹掉处理痕迹 ——
-     * 要撤销就用「撤销上一次分类」，要清垃圾就用「丢弃」。
-     */
-    deleteItem(id) {
+  /**
+   * 忽略一条收件箱条目（F-04 修订后的**唯一**"我不要它"动作）。
+   *
+   * 取代了原先并列的「丢弃」与「删除」：两者的用户决策完全相同
+   * （都是"我不要这条"），差异只在实现（`status` vs `deleted_at`、
+   * 30 天过期 vs 不过期）—— **把实现差异泄漏成用户决策是设计失败**，
+   * 每次整理收件箱都要多做一个没有实际意义的判断。
+   *
+   * 对**已转出的条目**也能用：那只是标记掉一行审计痕迹，
+   * **不影响任何任务/项目/资料**（`converted_to` 只是一条指向关系）。
+   *
+   * 幂等：已经忽略过的再点一次不报错。
+   */
+    ignoreItem(id) {
       withTx(database, () => {
         const item = getInboxItem(database, id);
         if (item === undefined) throw new NotFoundError(`收件箱条目不存在：${id}`);
-        if (item.status !== 'pending') {
-          const what = item.status === 'converted' ? '已转出' : '已丢弃';
-          throw new InvalidTransitionError(
-            `${what}的条目不能删除（那会抹掉处理痕迹）。要撤销请用「撤销上一次分类」。`,
-          );
-        }
-        deleteInboxItem(database, id);
-        indexer.remove('inbox', id);
+        if (item.status === 'archived') return; // 幂等
+        // 与 classify(discard) 共用同一个实现，避免两条路径的
+        // 撤销记录与索引维护逐渐分叉
+        archiveAndTrack(database, id, indexer, nowIso());
       });
     },
 

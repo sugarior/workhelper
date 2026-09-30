@@ -49,7 +49,8 @@ export const api = {
   classify: (id, target) => call('capture', 'classify', [id, target]),
   classifyMany: (ids, target) => call('capture', 'classifyMany', [ids, target]),
   undoLastClassification: () => call('capture', 'undoLastClassification'),
-  deleteItem: (id) => call('capture', 'deleteItem', id),
+  /** 忽略：收件箱唯一的"我不要这条"动作。待处理与已转出的都能用 */
+  ignoreItem: (id) => call('capture', 'ignoreItem', id),
 
   // ---------- 规划 ----------
   listProjects: (options = {}) => call('planning', 'listProjects', options),
@@ -85,6 +86,8 @@ export const api = {
   blockTask: (taskId, reason) => call('tracking', 'blockTask', [taskId, reason]),
   unblockTask: (taskId) => call('tracking', 'unblockTask', taskId),
   finishTask: (taskId) => call('tracking', 'completeTask', [taskId, {}]),
+  /** 中止任务（F-07 修订）：事情不做了，但保留记录与历史进展。原因可选 */
+  abortTask: (taskId, reason) => call('tracking', 'abortTask', [taskId, reason === undefined || reason === '' ? null : reason]),
   addToToday: (taskId) => call('tracking', 'addToToday', taskId),
   removeFromToday: (taskId) => call('tracking', 'removeFromToday', taskId),
   completedView: (range) => call('tracking', 'completedView', [range]),

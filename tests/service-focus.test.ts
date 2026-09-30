@@ -353,6 +353,86 @@ test('焦点候选：跨日后不再标出旧焦点（与 focus() 口径一致�
   });
 });
 
+test('中止：不填原因也能中止，记录与历史进展保留', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const task = planning.createTask({ title: '不做了的事' });
+    tracking.addProgress({ target: { kind: 'task', id: task.id }, kind: 'progress', body: '做了一半' });
+
+    const aborted = tracking.abortTask(task.id);
+    assert.equal(aborted.status, 'cancelled');
+    // 关键：中止不是删除，历史进展必须还在
+    assert.equal(tracking.taskTimeline(task.id).length, 1);
+    assert.equal(getTask(database, task.id)?.deletedAt, null, '中止不是删除');
+  });
+});
+
+test('中止：填了原因会留一条进展记录（可选项）', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const task = planning.createTask({ title: '任务' });
+
+    tracking.abortTask(task.id, '需求取消了');
+    const timeline = tracking.taskTimeline(task.id);
+    assert.equal(timeline.length, 1);
+    assert.equal(timeline[0]?.body, '需求取消了');
+    assert.equal(timeline[0]?.kind, 'decision');
+  });
+});
+
+test('中止：原因只填空白等于没填，不产生空记录', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const task = planning.createTask({ title: '任务' });
+
+    tracking.abortTask(task.id, '   ');
+    assert.equal(tracking.taskTimeline(task.id).length, 0);
+    assert.equal(getTask(database, task.id)?.status, 'cancelled');
+  });
+});
+
+test('中止：已完成的任务不能再中止（状态机把关）', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const task = planning.createTask({ title: '任务' });
+    tracking.completeTask(task.id);
+
+    assert.throws(() => tracking.abortTask(task.id), InvalidTransitionError);
+  });
+});
+
+test('中止：中止后不能再写进展（终态守卫）', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const task = planning.createTask({ title: '任务' });
+    tracking.abortTask(task.id);
+    assert.equal(getTask(database, task.id)?.status, 'cancelled');
+
+    assert.throws(
+      () => tracking.addProgress({ target: { kind: 'task', id: task.id }, kind: 'progress', body: '还想记' }),
+      /cancelled 状态，不能再写入推进记录/,
+    );
+  });
+});
+
+test('中止：中止会顺带清掉焦点（焦点只在进行中上）', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+    const task = planning.createTask({ title: '任务' });
+    tracking.focusTask(task.id);
+    assert.equal(tracking.focus()?.id, task.id);
+
+    tracking.abortTask(task.id, '不做了');
+    assert.equal(tracking.focus(), null, '中止后焦点必须消失');
+  });
+});
+
 test('焦点：日界为 0 点时，跨日判断跟着走', () => {
   useDb((database) => {
     const planning = createPlanningService(database);

@@ -58,12 +58,12 @@ export interface ServerOptions {
  */
 const ALLOWED: Readonly<Record<string, readonly string[]>> = {
   capture: ['quickCapture', 'listPending', 'countPending', 'classify', 'classifyMany',
-    'undoLastClassification', 'deleteItem'],
+    'undoLastClassification', 'ignoreItem'],
   planning: ['listProjects', 'projectTree', 'createProject', 'deleteProject',
     'listTasks', 'createTask', 'completeTask', 'reopenTask', 'updateTask',
     'createSubtask', 'setSubtaskStatus', 'reorder'],
   tracking: ['addProgress', 'taskTimeline', 'todayView', 'openTasksView', 'completedView', 'addToToday', 'removeFromToday',
-    'startTask', 'blockTask', 'unblockTask', 'completeTask',
+    'startTask', 'blockTask', 'unblockTask', 'completeTask', 'abortTask',
     'focus', 'focusTask', 'unfocus', 'noteOnFocus', 'focusCandidates'],
   journal: ['summarize', 'save'],
   search: ['search'],

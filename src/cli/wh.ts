@@ -33,8 +33,8 @@ const HELP = `WorkHelper ${VERSION} —— 常驻桌面的个人工作秘书
   newproj <id...> [选项]    把收件箱条目转成新项目（本身是一件事，不是一件事里的一步）
                             --goal <目标描述>；拆解留到 proj show 之后做
   archive <id...> [选项]    把收件箱条目存为资料（--kind note|meeting|link|file）
-  discard <id...>           丢弃收件箱条目
-  undo                      撤销上一次分类
+  discard <id...>           忽略收件箱条目（我不要这条；可在回收站放回）
+  undo                      撤销上一次操作
 
 推进
   today                     今日视图（逾期 / 今天到期 / 已排入 / 阻塞）
@@ -42,6 +42,7 @@ const HELP = `WorkHelper ${VERSION} —— 常驻桌面的个人工作秘书
   doing <id>                标记为进行中
   block <id> <原因>         标记为阻塞（同时留下一条卡点记录）
   unblock <id>              解除阻塞
+  abort <id> [原因]         中止任务（不做了；保留记录与历史进展）
   done <id> [--cascade]     完成任务（--cascade 一并完成其子任务）
   plan <id> / unplan <id>   加入 / 移出「今日」
   note <id> [类型] <内容>   追加进展；类型为 进展|卡点|决定|等待，默认进展
@@ -680,6 +681,14 @@ async function main(): Promise<void> {
         const ref = taskRef(context, rest[0]);
         const task = context.services.tracking.unblockTask(ref.id);
         console.log(`${STATUS_MARK[task.status]} ${clip(task.title)}`);
+        return;
+      }
+      case 'abort': {
+        // 中止：事情不做了，但保留记录与历史进展（与「完成」并列的第二种终止方式）
+        const ref = taskRef(context, rest[0]);
+        const reason = rest.slice(1).join(' ').trim();
+        const task = context.services.tracking.abortTask(ref.id, reason.length === 0 ? null : reason);
+        console.log(`${STATUS_MARK.cancelled} 已中止 ${clip(task.title)}`);
         return;
       }
       case 'done': {

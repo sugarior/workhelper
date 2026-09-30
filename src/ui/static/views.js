@@ -82,11 +82,11 @@ function makeFloating(anchor, panel, wrapper, prefer = 'right') {
  * 「更多 ▾」下拉菜单。
  *
  * 为什么把低频动作收进来（用户确认的界面方案 ②）：主路径必须零思考，
- * 而 `转项目` / `删除` / `撤销` 都是一天用不到几次的动作。
+ * 而 `转项目` / `撤销` 都是一天用不到几次的动作。
  * 把它们与主按钮并列会让"转任务"不再一眼可辨。
  *
- * 每个菜单项**必须带一行说明**（F-04 的交互要求）：这几个动作语义相近
- * （丢弃 / 删除 / 转项目），只靠名字容易点错。
+ * 每个菜单项**必须带一行说明**（F-04 的交互要求）：这几个动作语义相近，
+ * 只靠名字容易点错。
  *
  * @param entries [{ label, hint, danger?, run }]
  */
@@ -189,16 +189,22 @@ export async function renderInbox(root) {
     });
   }
 
-  async function deleteSelected(button) {
+  /**
+   * 忽略勾选的条目 —— 收件箱唯一的"我不要这条"动作。
+   *
+   * 它取代了原先并列的「丢弃」与「删除」：两者的用户决策完全相同，
+   * 差异只在实现（状态字段不同、是否自动过期）。**把实现差异泄漏成用户决策
+   * 是设计失败** —— 每次整理都要多做一个没有实际意义的判断。
+   */
+  async function ignoreSelected(button) {
     const ids = selected.size > 0 ? [...selected] : [];
     if (ids.length === 0) {
       flash('请先勾选要处理的条目', 'error');
       return;
     }
-    if (!window.confirm(`删除勾选的 ${ids.length} 条？\n\n进回收站，可恢复。`)) return;
     await withBusy(button, async () => {
-      for (const id of ids) await api.deleteItem(id);
-      flash(`已删除 ${ids.length} 条`);
+      for (const id of ids) await api.ignoreItem(id);
+      flash(`已忽略 ${ids.length} 条`);
       await reload();
     });
   }
@@ -216,8 +222,9 @@ export async function renderInbox(root) {
     }, '存为资料'),
     el('button', {
       class: 'danger',
-      onclick: (event) => void classifySelected({ kind: 'discard' }, event.target),
-    }, '丢弃'),
+      title: '我不要这条 —— 从收件箱移走，之后可在回收站放回',
+      onclick: (event) => void ignoreSelected(event.target),
+    }, '忽略'),
     moreMenu([
       {
         label: '转项目',
@@ -225,13 +232,7 @@ export async function renderInbox(root) {
         run: (button) => classifyAsProject(button),
       },
       {
-        label: '删除',
-        hint: '我根本不该记它 —— 进回收站，可恢复',
-        danger: true,
-        run: (button) => deleteSelected(button),
-      },
-      {
-        label: '撤销上一次分类',
+        label: '撤销上一次操作',
         hint: '把上一次转出的东西还原回收件箱',
         run: (button) => withBusy(button, async () => {
           const done = await api.undoLastClassification();
@@ -279,11 +280,13 @@ export async function renderInbox(root) {
         }, '资料'),
         el('button', {
           class: 'danger',
+          title: '我不要这条 —— 从收件箱移走，之后可在回收站放回',
           onclick: (event) => void withBusy(event.target, async () => {
-            await api.classify(item.id, { kind: 'discard' });
+            await api.ignoreItem(item.id);
+            flash('已忽略，可在回收站放回');
             await reload();
           }),
-        }, '丢弃'),
+        }, '忽略'),
         moreMenu([
           {
             label: '转项目',
@@ -292,17 +295,6 @@ export async function renderInbox(root) {
               if (!confirmAsProject(item.body)) return;
               await api.classify(item.id, { kind: 'project' });
               flash('已建项目，去「项目」页拆解');
-              await reload();
-            }),
-          },
-          {
-            label: '删除',
-            hint: '我根本不该记它 —— 进回收站',
-            danger: true,
-            run: (button) => withBusy(button, async () => {
-              if (!window.confirm(`删除「${item.body}」？\n\n进回收站，可恢复。`)) return;
-              await api.deleteItem(item.id);
-              flash('已删除');
               await reload();
             }),
           },
@@ -603,9 +595,21 @@ function buildTaskRow(task, dayKey, extraTag, onChanged) {
     await onChanged();
   }, 'primary'));
 
-  // 编辑入口（F-07 的兜底）。此前任务建好之后**任何字段都改不了** ——
-  // 截止日期只能靠速记框顺手识别，那只是便利，不能当唯一入口。
+  // 中止（F-07 修订）：与「完成」并列的第二种终止方式 —— 事情不做了，
+  // 但保留记录与历史进展。内核一直有 cancelled 状态，只是从未接到界面，
+  // 于是任务一旦开始，除了点「完成」就只能「卡住」。
   actions.push(moreMenu([
+    {
+      label: '中止（不做了）',
+      hint: '保留记录与历史进展，不是删除；原因可留空',
+      run: (button) => withBusy(button, async () => {
+        const answer = window.prompt('为什么不做？（可留空）', '');
+        if (answer === null) return; // 取消
+        await api.abortTask(task.id, answer.trim());
+        flash('已中止（记录仍保留）');
+        await onChanged();
+      }),
+    },
     {
       label: task.dueDate === null ? '设置截止日' : `改截止日（现 ${task.dueDate}）`,
       hint: '可写 2026/10/8、明天、下周三；留空或写 / 表示清除',
@@ -1115,41 +1119,49 @@ export function focusNoteInput() {
 // ============================================================
 
 /**
- * 回收站页面：两个**语义不同**的筛选，刻意不混成一条列表。
+ * 回收站页面（F-21b）。
  *
- * | | 已删除 | 已丢弃 |
- * |---|---|---|
- * | 我做了什么 | 我根本不该记它（误录纠正） | 这条是垃圾（主动判断） |
- * | 数据 | `deleted_at` 有值 | `status='archived'`，`deleted_at` 仍为 NULL |
- * | 保留 | 30 天自动清理 | **不过期**（自动删除等于悄悄抹掉我的判断） |
- * | 取回为 | 恢复原样 | 放回待处理 |
+ * **主筛选是「已忽略」** —— 收件箱唯一的"我不要这条"动作的结果。
+ * 它取代了原先并列的「已丢弃」与「已删除」两个筛选：
+ * 那两者的用户决策完全相同，差异只在实现（状态字段、是否自动过期），
+ * 把实现差异摆成两个筛选等于让用户去关心存储细节。
+ *
+ * 「已删除」只在**存在历史数据**（旧版本软删除的行）时才出现，
+ * 并明确说明它是历史残留 —— 既不清掉用户的数据，也不再让新用户困惑。
  *
  * 页面内保留当前筛选，切走再回来不会跳回默认项。
  */
-let trashTab = 'deleted';
+let trashTab = 'ignored';
 
 export async function renderTrash(root) {
   const overview = await api.trashOverview();
   const { counts, retentionDays } = overview;
+  const hasLegacyDeleted = counts.deleted > 0;
+
+  // 没有历史数据时不显示「已删除」，且默认筛选必须是「已忽略」
+  if (!hasLegacyDeleted) trashTab = 'ignored';
+  else if (trashTab !== 'ignored' && trashTab !== 'deleted') trashTab = 'ignored';
 
   const switcher = el('div', { class: 'toolbar' }, [
     el('button', {
-      class: trashTab === 'deleted' ? 'primary' : '',
-      onclick: () => { trashTab = 'deleted'; void reload(); },
-    }, `已删除（${counts.deleted}）`),
-    el('button', {
-      class: trashTab === 'discarded' ? 'primary' : '',
-      onclick: () => { trashTab = 'discarded'; void reload(); },
-    }, `已丢弃（${counts.discarded}）`),
+      class: trashTab === 'ignored' ? 'primary' : '',
+      onclick: () => { trashTab = 'ignored'; void reload(); },
+    }, `已忽略（${counts.discarded}）`),
+    hasLegacyDeleted
+      ? el('button', {
+        class: trashTab === 'deleted' ? 'primary' : '',
+        onclick: () => { trashTab = 'deleted'; void reload(); },
+      }, `历史已删除（${counts.deleted}）`)
+      : null,
   ]);
 
   const rows = trashTab === 'deleted'
     ? renderDeletedRows(overview.deleted, retentionDays, reload)
-    : renderDiscardedRows(overview.discarded, reload);
+    : renderIgnoredRows(overview.discarded, reload);
 
   const explain = trashTab === 'deleted'
-    ? `误录纠正进这里，保留 ${retentionDays} 天后自动清理。恢复即回到原样。`
-    : '「丢弃」是我主动做的判断，所以**不会自动过期**，也仍然能被搜索到。放回待处理即可继续整理。';
+    ? `这些是旧版本"删除"动作留下的记录，保留 ${retentionDays} 天后自动清理。恢复即回到原样。`
+    : '「忽略」表示"我不要这条"。它**不会自动过期**，也仍然能被搜索到；放回待处理即可继续整理。';
 
   mount(root, [
     el('h2', {}, '回收站'),
@@ -1199,15 +1211,15 @@ function renderDeletedRows(entries, retentionDays, onChanged) {
   ])));
 }
 
-function renderDiscardedRows(entries, onChanged) {
+function renderIgnoredRows(entries, onChanged) {
   if (entries.length === 0) {
-    return el('div', { class: 'empty' }, '没有已丢弃的内容。丢弃的条目会一直留在这里，不会被自动清掉。');
+    return el('div', { class: 'empty' }, '没有已忽略的内容。忽略的条目会一直留在这里，不会被自动清掉。');
   }
   return el('ul', { class: 'list' }, entries.map((entry) => el('li', {}, [
     el('div', { class: 'item-body' }, [
       el('div', { class: 'item-title' }, entry.title),
       el('div', { class: 'item-meta' }, [
-        el('span', { class: 'tag' }, '已丢弃'),
+        el('span', { class: 'tag' }, '已忽略'),
         entry.rawInput === null ? null : el('span', { class: 'item-raw' }, `原文：${entry.rawInput}`),
         el('span', { class: 'item-raw' }, '不过期'),
       ]),
@@ -1227,7 +1239,7 @@ function renderDiscardedRows(entries, onChanged) {
           if (!window.confirm(
             `彻底删除「${entry.title}」？\n\n` +
             '· 这是物理删除，**无法恢复**\n' +
-            '· 若只是不想让它占地方，其实可以留着 —— 丢弃的内容不过期，也还能被搜到',
+            '· 若只是不想让它占地方，其实可以留着 —— 忽略的内容不过期，也还能被搜到',
           )) return;
           await api.purgeDiscarded(entry.id);
           flash('已彻底删除');

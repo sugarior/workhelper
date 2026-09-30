@@ -158,6 +158,16 @@ export interface TrackingService {
   blockTask(taskId: string, reason: string): Task;
   unblockTask(taskId: string): Task;
   completeTask(taskId: string, options?: { cascadeSubtasks?: boolean }): Task;
+  /**
+   * 中止任务（F-07 修订）：事情不做了，但**保留记录与历史进展**。
+   *
+   * 与「完成」并列的第二种终止方式。内核早就有 `cancelled` 状态与流转规则，
+   * 只是从未接到界面 —— 于是任务一旦开始，除了点「完成」就只能「卡住」。
+   *
+   * 原因**可选**（用户确认）：填了就作为一条进展记录留痕，不填也允许中止。
+   * 写成进展而不是新增字段，是为了不引入一个只为"中止"服务的列。
+   */
+  abortTask(taskId: string, reason?: string | null): Task;
   /** 某个任务最近一次卡点的原因，解除阻塞时展示 */
   latestBlocker(taskId: string): ProgressEntry | undefined;
 }
@@ -605,6 +615,22 @@ export function createTrackingService(database: DatabaseSync): TrackingService {
         }
         indexEntity(database, { entityType: 'task', entityId: task.id, title: task.title, body: task.detail ?? '' });
         return task;
+      });
+    },
+
+    /**
+     * 中止任务（F-07 修订）。
+     *
+     * 原因可选：填了就先留一条进展记录再改状态 —— **顺序很重要**，
+     * 因为任务变成 `cancelled` 之后就是终态，再写进展会被终态守卫拒绝。
+     */
+    abortTask(taskId, reason) {
+      return withTx(database, () => {
+        const text = reason?.trim() ?? '';
+        if (text.length > 0) {
+          addProgressCore({ target: { kind: 'task', id: taskId }, kind: 'decision', body: text });
+        }
+        return applyTaskStatus(taskId, 'cancelled');
       });
     },
 
