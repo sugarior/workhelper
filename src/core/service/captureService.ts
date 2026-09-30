@@ -223,20 +223,21 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
         }
       }
 
-      // 入口来自正文的解析（速记时原样保存，这里才解析）
+      // 入口来自正文的解析（速记时原样保存，这里才解析）。
+      // 识别不出路径/链接的行会成为 `text` 入口，而**不是被丢掉** ——
+      // 它指向实物或无法用路径表达的信息，属于资料内容（不违反 M3）。
       const detected = parseEntries(item.body).entries;
-      // 一条资料至少要有一个入口；识别不出路径/链接时它就不是指针，
-      // 因此直接拒绝并说明替代做法 —— 而不是"存一条没有入口的资料"。
-      // 校验放在写库之前：拒绝时不应留下任何半成品。
+      // 空正文是唯一"没有入口"的途径；此时它确实不能作为资料。
       if (detected.length === 0) {
-        throw new ValidationError(
-          '这条里没有可识别的路径或链接，因此不能作为资料。若只是要留存文字，请改成任务或留在收件箱里。',
-        );
+        throw new ValidationError('这条是空的，没有可作为资料的内容。');
       }
 
+      // 标题优先用能打开的入口（更利于在列表里认出这条资料是什么），
+      // 全是文字入口时就用第一条文字
+      const head = detected.find((draft) => draft.kind !== 'text') ?? detected[0]!;
       const archive = createArchive(database, {
         kind: target.archiveKind ?? 'note',
-        title: detected[0]!.note ?? detected[0]!.target,
+        title: head.note ?? head.target,
         dayKey,
       });
       for (const draft of detected) {

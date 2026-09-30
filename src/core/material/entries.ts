@@ -24,8 +24,13 @@ export interface EntryDraft {
 export interface ParsedEntries {
   entries: EntryDraft[];
   /**
-   * 没能识别成入口的行（原样保留，调用方据此建普通收件箱条目）。
-   * 这是"绝不丢内容"的落点。
+   * 仍然是空数组，保留字段是为了调用方不必改签名。
+   *
+   * **这里曾经把"识别不出路径/链接的行"放进 leftovers，然后在「存为资料」时丢掉** ——
+   * 那是错的：那样的行（"纸质原件在左抽屉第二格"）本身就是资料内容，
+   * 它指向实物，只是不是 dir/file/url 三种形态之一。
+   * M3 禁止的是**存文件字节**，不是禁止文字成为资料。
+   * 现在这类行成为 `kind: 'text'` 的入口，一行一个入口的规则因此保持完整。
    */
   leftovers: string[];
 }
@@ -120,32 +125,44 @@ function tryPath(line: string): EntryDraft | null {
 }
 
 /**
- * 解析速记板输入：一行一个入口；识别不出路径/链接的行原样留在 leftovers。
+ * 解析速记板输入：一行一个入口。
+ *
+ * 识别不出路径/链接的行**不是被丢掉，而是成为 `text` 入口** ——
+ * 一行一个入口的规则因此没有例外（见 ParsedEntries 的说明）。
  *
  * 顺序上**先试网址再试路径**：`file:///D:/x` 这类既像 URL 又像路径，
  * 按 URL 处理更符合"点一下用浏览器/默认程序打开"的预期。
  */
 export function parseEntries(text: string): ParsedEntries {
   const entries: EntryDraft[] = [];
-  const leftovers: string[] = [];
 
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (line.length === 0) continue;
 
     const draft = tryUrl(line) ?? tryPath(line);
-    if (draft === null) leftovers.push(line);
-    else entries.push(draft);
+    if (draft === null) {
+      // 文字入口：整行就是内容，没有"注释"可言（行本身就是那句话）
+      entries.push({ kind: 'text', target: line, note: null });
+    } else {
+      entries.push(draft);
+    }
   }
 
-  return { entries, leftovers };
+  return { entries, leftovers: [] };
 }
 
-/** 供界面判断"这行会被当成入口吗"（速记板预览用） */
-export function looksLikeEntry(line: string): boolean {
+/** 供界面判断"这行会被当成哪一类入口"（速记板预览用） */
+export function classifyLine(line: string): EntryDraft | null {
   const trimmed = line.trim();
-  if (trimmed.length === 0) return false;
-  return tryUrl(trimmed) !== null || tryPath(trimmed) !== null;
+  if (trimmed.length === 0) return null;
+  return tryUrl(trimmed) ?? tryPath(trimmed) ?? { kind: 'text', target: trimmed, note: null };
+}
+
+/** 这行会被识别成"可打开之物"吗（`text` 不算） */
+export function looksLikeEntry(line: string): boolean {
+  const draft = classifyLine(line);
+  return draft !== null && draft.kind !== 'text';
 }
 
 /** 断言：识别出的 kind 必须是合法取值（防止正则改动引入非法值） */

@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseEntries, looksLikeEntry } from '../src/core/material/entries.ts';
+import { parseEntries, looksLikeEntry, classifyLine } from '../src/core/material/entries.ts';
 
 test('识别：一行一个入口，行内其余文字成为该入口的注释', () => {
   const text = [
@@ -74,7 +74,9 @@ test('识别：去掉尾随的中文句读', () => {
   assert.equal(entries[0]?.note, '工作区是 别忘了');
 });
 
-test('绝不丢内容：识别不出的行原样留在 leftovers', () => {
+test('文字入口：识别不出路径/链接的行成为 text 入口，而不是被丢掉', () => {
+  // 用户指出的真实场景（S5）：任务的资料里既要能放模板文件，
+  // 也要能写"纸质原件在哪"。后者指向实物，属于指针信息，不违反 M3。
   const text = [
     'D:\\work\\proj',
     '今天开了个会，决定先做订单库',
@@ -83,47 +85,59 @@ test('绝不丢内容：识别不出的行原样留在 leftovers', () => {
   ].join('\n');
 
   const { entries, leftovers } = parseEntries(text);
-  assert.deepEqual(entries.map((e) => e.target), ['D:\\work\\proj', '\\\\\\\\nas\\share']);
-  assert.deepEqual(leftovers, ['今天开了个会，决定先做订单库', '记得问一下法务']);
+  assert.deepEqual(entries.map((e) => `${e.kind}:${e.target}`), [
+    'dir:D:\\work\\proj',
+    'text:今天开了个会，决定先做订单库',
+    'dir:\\\\\\\\nas\\share',
+    'text:记得问一下法务',
+  ]);
+  assert.deepEqual(leftovers, [], '不再有"被丢掉的行"');
 });
 
-test('不猜：裸文件名与裸域名都不算入口', () => {
-  // 裸文件名（无分隔符）与裸域名太容易是普通文字，宁可留在 leftovers
-  const { entries, leftovers } = parseEntries([
-    '方案.docx',
-    'example.com',
-    '见附件三',
-  ].join('\n'));
-  assert.deepEqual(entries, [], '这三行都不该被当成入口');
-  assert.equal(leftovers.length, 3, '它们必须原样保留，不能被丢掉');
+test('文字入口：一行一个入口的规则没有例外', () => {
+  const { entries } = parseEntries('纸质原件在左抽屉第二格');
+  assert.deepEqual(entries, [{ kind: 'text', target: '纸质原件在左抽屉第二格', note: null }]);
 });
 
-test('不猜：单独的盘符或分隔符不算入口', () => {
-  const { entries, leftovers } = parseEntries(['D:\\', '//'].join('\n'));
-  assert.deepEqual(entries, [], '都不是入口');
-  // 它们仍原样保留 —— 宁可留下两条没用的行，也不丢用户写的东西
-  assert.deepEqual(leftovers, ['D:\\', '//']);
+test('不猜：裸文件名与裸域名不会被当成可打开之物（而是文字入口）', () => {
+  // 裸文件名与裸域名太容易是普通文字，因此不猜成 file/url；
+  // 但它们也不会被丢掉 —— 成为 text 入口
+  const { entries } = parseEntries(['方案.docx', 'example.com', '见附件三'].join('\n'));
+  assert.deepEqual(entries.map((e) => e.kind), ['text', 'text', 'text']);
+  assert.deepEqual(entries.map((e) => e.target), ['方案.docx', 'example.com', '见附件三']);
 });
 
-test('空行被跳过，不产生空入口也不进 leftovers', () => {
+test('不猜：单独的盘符与分隔符也不算可打开之物', () => {
+  const { entries } = parseEntries(['D:\\', '//'].join('\n'));
+  assert.deepEqual(entries.map((e) => e.kind), ['text', 'text']);
+});
+
+test('空行被跳过，不产生空入口', () => {
   const { entries, leftovers } = parseEntries('\n\nD:\\work\\proj\n\n\n');
   assert.equal(entries.length, 1);
   assert.deepEqual(leftovers, []);
 });
 
-test('全部是普通文字时一个入口都没有（速记板退化成普通收件箱）', () => {
-  const { entries, leftovers } = parseEntries('随口记一句');
-  assert.deepEqual(entries, []);
-  assert.deepEqual(leftovers, ['随口记一句']);
+test('全是普通文字时，它们全都是文字入口（速记板不会丢内容）', () => {
+  const { entries } = parseEntries('随口记一句');
+  assert.deepEqual(entries, [{ kind: 'text', target: '随口记一句', note: null }]);
 });
 
-test('looksLikeEntry 与 parseEntries 口径一致', () => {
+test('classifyLine 与 parseEntries 口径一致', () => {
   for (const line of ['D:\\work\\proj', 'https://a.com/b', '随口记一句', '方案.docx', '']) {
     const parsed = parseEntries(line);
-    assert.equal(
-      looksLikeEntry(line),
-      parsed.entries.length === 1,
+    const one = classifyLine(line);
+    assert.deepEqual(
+      parsed.entries,
+      one === null ? [] : [one],
       `「${line}」的口径必须一致`,
     );
   }
+});
+
+test('looksLikeEntry 只对"可打开之物"为真（文字入口不算）', () => {
+  assert.equal(looksLikeEntry('D:\\work\\proj'), true);
+  assert.equal(looksLikeEntry('https://a.com/b'), true);
+  assert.equal(looksLikeEntry('随口记一句'), false, '文字入口不能"打开"，所以不算');
+  assert.equal(looksLikeEntry(''), false);
 });

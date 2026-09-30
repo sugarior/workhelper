@@ -50,7 +50,17 @@ export type ArchiveKind = (typeof ARCHIVE_KINDS)[number];
  * 网址不单列"网络资料" —— 飞书文档、Overleaf 这类网址**本身就是工作区**，
  * 按"是否本地"分类没有意义，有用的是"怎么打开"。
  */
-export const MATERIAL_ENTRY_KINDS = ['dir', 'file', 'url'] as const;
+/**
+ * 资料入口的形态。
+ *
+ * 前三者是**可打开之物**（指针）；`text` 是**一段文字**，用于记录指向实物
+ * 或无法以路径表达的信息（"纸质原件在左抽屉第二格"）。
+ *
+ * 它不违反 M3：M3 禁止的是**把文件字节存进库里**，不是禁止文字成为资料。
+ * `text` 入口指向的是"实物/信息所在之处"，仍然是指针信息。
+ * 代价（有意接受）：它无法"打开"，界面在多选打开时跳过它、改为可复制，并明确标注。
+ */
+export const MATERIAL_ENTRY_KINDS = ['dir', 'file', 'url', 'text'] as const;
 export type MaterialEntryKind = (typeof MATERIAL_ENTRY_KINDS)[number];
 
 /** 资料可挂靠的对象类型（需求 §4.1 M1：必须至少挂一个） */

@@ -123,18 +123,38 @@ test('分类为资料：不选目标必须被拒绝（规则 M2 的落点）', (
   });
 });
 
-test('分类为资料：正文里没有路径/链接时要说清替代做法', () => {
+test('分类为资料：纯文字也能成为资料（指向实物，不违反 M3）', () => {
   useDb((database) => {
     const capture = createCaptureService(database);
     const planning = createPlanningService(database);
-    const task = planning.createTask({ title: '任务' });
-    const item = capture.quickCapture({ text: '随口记一句，没有任何路径' }).item;
+    const task = planning.createTask({ title: '报销' });
+    // 用户指出的真实场景（S5）：资料里要能写"纸质原件在哪"。
+    // M3 禁止的是存文件字节，不是禁止文字成为资料。
+    const item = capture.quickCapture({ text: '纸质原件在左抽屉第二格' }).item;
 
-    assert.throws(
-      () => capture.classify(item.id, { kind: 'archive', links: [{ type: 'task', id: task.id }] }),
-      /没有可识别的路径或链接/,
-    );
-    assert.equal(getInboxItem(database, item.id)?.status, 'pending');
+    const result = capture.classify(item.id, { kind: 'archive', links: [{ type: 'task', id: task.id }] });
+    const entries = listEntries(database, result.createdId);
+    assert.deepEqual(entries.map((e) => `${e.kind}:${e.target}`), ['text:纸质原件在左抽屉第二格']);
+    assert.deepEqual(listArchivesLinkedTo(database, 'task', task.id), [result.createdId]);
+  });
+});
+
+test('分类为资料：混合内容一行一个入口，文字行不再被丢掉', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    const planning = createPlanningService(database);
+    const task = planning.createTask({ title: '报销' });
+    const item = capture.quickCapture({
+      text: [
+        'D:\\财务\\报销单模板.xlsx  模板',
+        '纸质原件在左抽屉第二格',
+        'https://xxx.feishu.cn/docx/abc',
+      ].join('\n'),
+      kindHint: 'note',
+    }).item;
+
+    const result = capture.classify(item.id, { kind: 'archive', links: [{ type: 'task', id: task.id }] });
+    assert.deepEqual(listEntries(database, result.createdId).map((e) => e.kind), ['file', 'text', 'url']);
   });
 });
 
