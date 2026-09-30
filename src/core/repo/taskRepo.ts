@@ -24,6 +24,8 @@ interface TaskRow {
   completed_at: string | null;
   sort_order: number;
   source_inbox_id: string | null;
+  focused_at: string | null;
+  focused_day_key: string | null;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
@@ -50,6 +52,8 @@ function toTask(row: TaskRow): Task {
     completedAt: row.completed_at,
     sortOrder: row.sort_order,
     sourceInboxId: row.source_inbox_id,
+    focusedAt: row.focused_at,
+    focusedDayKey: row.focused_day_key,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     deletedAt: row.deleted_at,
@@ -80,6 +84,59 @@ export interface TaskPatch {
   blockedReason?: string | null;
   plannedFor?: string | null;
   completedAt?: string | null;
+  focusedAt?: string | null;
+  focusedDayKey?: string | null;
+}
+
+// ---------- 焦点（需求 §5.2.1） ----------
+//
+// 全库最多一条任务带焦点，这条由迁移 005 的部分唯一索引在**数据库层**保证。
+// 因此 setFocus 必须先清掉旧的再设新的，否则会撞索引。
+// 这里不做"只能落在 doing" 的校验 —— 那是领域规则，属于服务层。
+
+/** 当前焦点任务（原始行，不含跨日判断） */
+export function findFocusedTask(database: DatabaseSync): Task | undefined {
+  const row = queryOne<TaskRow>(
+    database,
+    `SELECT * FROM ${TABLE} WHERE focused_at IS NOT NULL AND deleted_at IS NULL LIMIT 1`,
+  );
+  return row === undefined ? undefined : toTask(row);
+}
+
+/** 清掉当前焦点。返回被清掉的任务 id（无焦点时返回 null） */
+export function clearFocus(database: DatabaseSync): string | null {
+  const current = findFocusedTask(database);
+  if (current === undefined) return null;
+  execute(
+    database,
+    `UPDATE ${TABLE} SET focused_at = NULL, focused_day_key = NULL, updated_at = ? WHERE id = ?`,
+    nowIso(),
+    current.id,
+  );
+  return current.id;
+}
+
+/**
+ * 设置焦点。调用方负责先做领域校验（状态必须是 doing）。
+ * 内部先清旧焦点，满足"全库唯一"。
+ */
+export function setFocus(database: DatabaseSync, taskId: string, dayKey: string): Task {
+  requireById(getTask(database, taskId), '任务', taskId);
+  clearFocus(database);
+  execute(
+    database,
+    `UPDATE ${TABLE} SET focused_at = ?, focused_day_key = ?, updated_at = ? WHERE id = ?`,
+    nowIso(),
+    dayKey,
+    nowIso(),
+    taskId,
+  );
+  return requireById(getTask(database, taskId), '任务', taskId);
+}
+
+/** 某任务是否就是当前焦点（供"完成/卡住时清焦点"判断，避免误清别人的焦点） */
+export function isFocused(database: DatabaseSync, taskId: string): boolean {
+  return findFocusedTask(database)?.id === taskId;
 }
 
 export function createTask(database: DatabaseSync, input: TaskCreate): Task {
@@ -219,8 +276,21 @@ export function listOpenTasksDueOnOrBefore(database: DatabaseSync, dayKey: strin
   return listTasksByStatuses(database, OPEN_TASK_STATUSES, { dueOnOrBefore: dayKey });
 }
 
+/**
+ * 更新任务。**这里是所有任务写入的必经之路**，因此"焦点不变式"也守在这里：
+ *
+ * **只要任务的状态变成非 `doing`，焦点就必须一并清掉。**
+ *
+ * 为什么放在仓储层而不是服务层（缺陷 26）：状态流转在服务层有**两份独立实现**
+ * （tracking 的推进/完成、planning 的显式设状态），规则写在其中一份上必然漏掉另一份。
+ * 本项目已经因为"同一规则写两处"吃过一次亏（缺陷 24），这里改用数据层守不变式 ——
+ * 与"全库唯一由部分唯一索引保证"是同一个思路。
+ */
 export function updateTask(database: DatabaseSync, id: string, patch: TaskPatch): Task {
   requireById(getTask(database, id), '任务', id);
+
+  // 状态要离开 doing 时，无论调用方是否记得，焦点都一起清掉
+  const leavingFocus = patch.status !== undefined && patch.status !== 'doing';
   updateById(database, TABLE, id, {
     title: patch.title,
     project_id: patch.projectId,
@@ -233,6 +303,8 @@ export function updateTask(database: DatabaseSync, id: string, patch: TaskPatch)
     blocked_reason: patch.blockedReason,
     planned_for: patch.plannedFor,
     completed_at: patch.completedAt,
+    focused_at: leavingFocus ? null : patch.focusedAt,
+    focused_day_key: leavingFocus ? null : patch.focusedDayKey,
   });
   return requireById(getTask(database, id), '任务', id);
 }
@@ -259,7 +331,10 @@ export function countByProject(database: DatabaseSync, projectId: string): numbe
   return Number(row?.c ?? 0);
 }
 
-/** 供服务层做状态流转时直接改状态（含完成水印与阻塞原因） */
+/**
+ * 供服务层做状态流转时直接改状态（含完成水印与阻塞原因）。
+ * 焦点的清理由 updateTask 统一负责，这里不再重复。
+ */
 export function applyStatus(
   database: DatabaseSync,
   id: string,

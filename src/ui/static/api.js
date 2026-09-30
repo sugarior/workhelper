@@ -77,6 +77,12 @@ export const api = {
   removeFromToday: (taskId) => call('tracking', 'removeFromToday', taskId),
   completedView: (range) => call('tracking', 'completedView', [range]),
 
+  // ---------- 焦点（F-15b / F-15c） ----------
+  focus: () => call('tracking', 'focus'),
+  focusTask: (taskId) => call('tracking', 'focusTask', taskId),
+  unfocus: () => call('tracking', 'unfocus'),
+  noteOnFocus: (input) => call('tracking', 'noteOnFocus', [input]),
+
   // ---------- 日志 ----------
   summarize: (dayKey) => call('journal', 'summarize', dayKey),
   saveLog: (dayKey, body) => call('journal', 'save', [dayKey, body]),

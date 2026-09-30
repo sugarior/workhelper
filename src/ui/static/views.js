@@ -33,6 +33,11 @@ async function reload() {
  * 每个菜单项**必须带一行说明**（F-04 的交互要求）：这几个动作语义相近
  * （丢弃 / 删除 / 转项目），只靠名字容易点错。
  *
+ * 定位用 position: fixed + 手工算坐标，原因有二：
+ *  1. 列表容器 `ul.list` 有 `overflow: hidden`（用来裁圆角），
+ *     absolute 浮层会被裁断 —— 这正是"菜单点不到"的成因；
+ *  2. 靠近窗口底部的行，菜单需要**向上翻**而不是被窗口切掉。
+ *
  * @param entries [{ label, hint, danger?, run }]
  */
 function moreMenu(entries) {
@@ -47,23 +52,41 @@ function moreMenu(entries) {
     el('span', { class: 'menu-hint' }, entry.hint),
   ])));
 
-  const wrapper = el('div', { class: 'menu' }, [
-    el('button', {
-      class: 'menu-trigger',
-      title: '更多处理方式',
-      onclick: (event) => {
-        event.stopPropagation();
-        wrapper.classList.toggle('open');
-      },
-    }, '更多 ▾'),
-    panel,
-  ]);
+  const trigger = el('button', {
+    class: 'menu-trigger',
+    title: '更多处理方式',
+    onclick: (event) => {
+      event.stopPropagation();
+      if (wrapper.classList.contains('open')) close();
+      else open();
+    },
+  }, '更多 ▾');
+
+  const wrapper = el('div', { class: 'menu' }, [trigger, panel]);
+
+  /** 把面板摆到触发按钮下方；下方空间不够就翻到上方，横向贴住视口右边 */
+  function place() {
+    const anchor = trigger.getBoundingClientRect();
+    const width = panel.offsetWidth || 280;
+    const height = panel.offsetHeight || 160;
+
+    const left = Math.max(8, Math.min(anchor.right - width, window.innerWidth - width - 8));
+    const below = anchor.bottom + 4;
+    const flipUp = below + height > window.innerHeight - 8 && anchor.top - height - 4 > 8;
+    panel.style.left = `${left}px`;
+    panel.style.top = `${flipUp ? anchor.top - height - 4 : below}px`;
+  }
+
+  function open() {
+    wrapper.classList.add('open');
+    place();
+  }
 
   function close() {
     wrapper.classList.remove('open');
   }
 
-  // 点别处收起：菜单是绝对定位浮层，不收起会挡住在下面的条目
+  // 点别处收起：菜单是浮层，不收起会挡住在下面的条目
   document.addEventListener('click', close);
   return wrapper;
 }
@@ -500,6 +523,21 @@ function buildTaskRow(task, dayKey, extraTag, onChanged) {
 
   const actions = [push('记一笔', async () => toggleProgress())];
 
+  // 聚焦（F-15b）：只能落在 doing 上，所以 todo 会先自动转进行中；
+  // 已经是当前焦点的任务显示"取消聚焦"。
+  if (task.focusedAt !== null) {
+    actions.push(push('取消聚焦', async () => {
+      await api.unfocus();
+      await onChanged();
+    }));
+  } else if (task.status !== 'done' && task.status !== 'cancelled') {
+    actions.push(push('聚焦', async () => {
+      await api.focusTask(task.id);
+      flash('已聚焦，顶部可以直接记一笔');
+      await onChanged();
+    }));
+  }
+
   if (task.status === 'todo') {
     actions.push(push('开始', async () => {
       await api.startTask(task.id);
@@ -700,20 +738,28 @@ async function renderProjectTree(root, projectId) {
   const tree = await api.projectTree(projectId);
   const { total, done } = tree.counts;
 
-  const taskTitleInput = el('input', { type: 'text', placeholder: '新任务标题' });
-  const addTaskRow = el('div', { class: 'toolbar' }, [
-    taskTitleInput,
-    el('button', {
-      class: 'primary',
-      onclick: (event) => void withBusy(event.target, async () => {
-        const title = taskTitleInput.value.trim();
-        if (title.length === 0) return;
-        await api.createTask({ title, projectId });
-        flash('任务已添加');
-        await reload();
-      }),
-    }, '添加任务'),
-  ]);
+  const taskTitleInput = el('input', { type: 'text', placeholder: '新任务标题（Enter 添加）' });
+  const addTaskButton = el('button', { class: 'primary' }, '添加任务');
+
+  async function submitTask() {
+    const title = taskTitleInput.value.trim();
+    if (title.length === 0) return;
+    await withBusy(addTaskButton, async () => {
+      await api.createTask({ title, projectId });
+      flash('任务已添加');
+      await reload();
+    });
+  }
+
+  // 写完直接回车就加进去（用户反馈：必须点按钮很别扭）
+  taskTitleInput.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    void submitTask();
+  });
+  addTaskButton.addEventListener('click', () => void submitTask());
+
+  const addTaskRow = el('div', { class: 'toolbar' }, [taskTitleInput, addTaskButton]);
 
   const nodes = await Promise.all(tree.tasks.map(async (node) => {
     const task = node.task;
@@ -726,7 +772,25 @@ async function renderProjectTree(root, projectId) {
     if (node.counts.total > 0) tags.push(el('span', { class: 'tag' }, `${node.counts.done}/${node.counts.total} 子任务`));
 
     // 子任务列表
-    const subtaskInput = el('input', { type: 'text', placeholder: '新子任务' });
+    const subtaskInput = el('input', { type: 'text', placeholder: '新子任务（Enter 添加）' });
+    const subtaskAddButton = el('button', {}, '＋');
+
+    async function submitSubtask() {
+      const title = subtaskInput.value.trim();
+      if (title.length === 0) return;
+      await withBusy(subtaskAddButton, async () => {
+        await api.createSubtask({ taskId: task.id, title });
+        await reload();
+      });
+    }
+
+    subtaskInput.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      void submitSubtask();
+    });
+    subtaskAddButton.addEventListener('click', () => void submitSubtask());
+
     const subtasks = el('ul', { class: 'subtask-list' }, [
       ...node.subtasks.map((subtask) => el('li', { class: subtask.status === 'done' ? 'done' : '' }, [
         el('input', {
@@ -739,17 +803,7 @@ async function renderProjectTree(root, projectId) {
         }),
         el('span', {}, subtask.title),
       ])),
-      el('li', {}, [
-        subtaskInput,
-        el('button', {
-          onclick: (event) => void withBusy(event.target, async () => {
-            const title = subtaskInput.value.trim();
-            if (title.length === 0) return;
-            await api.createSubtask({ taskId: task.id, title });
-            await reload();
-          }),
-        }, '＋'),
-      ]),
+      el('li', {}, [subtaskInput, subtaskAddButton]),
     ]);
 
     // 进展时间线（按需加载，避免一次拉全部）
@@ -821,6 +875,97 @@ function contextTag(entry) {
   const parts = [entry.projectTitle, entry.taskTitle, entry.subtaskTitle]
     .filter((part) => part !== null && part !== undefined && part !== '');
   return parts.length === 0 ? null : el('span', { class: 'tag' }, parts.join(' › '));
+}
+
+// ============================================================
+// 焦点常驻条（F-15b / F-15c）
+// ============================================================
+
+/**
+ * 顶部常驻条：显示"当前在做哪件"，并承载「记一笔」。
+ *
+ * 它解决的是需求 §3.1 里那句"频繁被打断"：回来时**不需要回想**我刚才在做什么。
+ * 因此这一条只在有焦点时才有内容 —— 没有焦点时给一句去哪聚焦的提示，
+ * 而不是留一个空框（空框会让人以为是坏了）。
+ *
+ * 由 app.js 在每次重绘后调用；它自己管输入框状态（展开/收起）。
+ */
+export async function renderFocusBar(root, onChanged) {
+  let focused = null;
+  try {
+    focused = await api.focus();
+  } catch {
+    focused = null;
+  }
+
+  if (focused === null) {
+    mount(root, [
+      el('span', { class: 'focus-label' }, '当前在做：'),
+      el('span', { class: 'item-raw' }, '还没有聚焦的任务 —— 去「全部」里对一条任务点「聚焦」'),
+    ]);
+    root.classList.add('idle');
+    return;
+  }
+  root.classList.remove('idle');
+
+  const kindSelect = el('select', {}, [
+    el('option', { value: 'progress' }, '进展'),
+    el('option', { value: 'blocker' }, '卡点'),
+    el('option', { value: 'decision' }, '决定'),
+    el('option', { value: 'waiting' }, '等待'),
+  ]);
+  const noteInput = el('input', { type: 'text', placeholder: '刚才这件事有什么进展？（Enter 提交）' });
+
+  async function submit() {
+    const body = noteInput.value.trim();
+    if (body.length === 0) return;
+    await withBusy(noteInput, async () => {
+      await api.noteOnFocus({ kind: kindSelect.value, body });
+      flash('已记入当前任务');
+      // 卡点会联动状态并顺带清掉焦点，所以整页与焦点条都要刷新
+      await onChanged();
+    });
+  }
+
+  noteInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void submit();
+    }
+    if (event.key === 'Escape') noteInput.blur();
+  });
+
+  mount(root, [
+    el('span', { class: 'focus-label' }, '当前在做：'),
+    el('span', { class: 'focus-title' }, focused.title),
+    kindSelect,
+    noteInput,
+    el('button', { class: 'primary', onclick: () => void submit() }, '记一笔'),
+    el('button', {
+      title: '取消聚焦（任务仍留在「进行中」里）',
+      onclick: (event) => void withBusy(event.target, async () => {
+        await api.unfocus();
+        flash('已取消聚焦');
+        await onChanged();
+      }),
+    }, '取消聚焦'),
+  ]);
+
+  // 供快捷键使用：Ctrl+Shift+Space 把光标直接送到这里
+  focusBarInput = noteInput;
+}
+
+/**
+ * 快捷键用的输入框引用。视图重建时会重新赋值，因此用一个模块级变量。
+ * 快捷键本身注册在 app.js（它管外壳），这里只提供落点。
+ */
+let focusBarInput = null;
+
+/** 让「记一笔」输入框获得焦点；返回是否成功（没有焦点任务时失败） */
+export function focusNoteInput() {
+  if (focusBarInput === null) return false;
+  focusBarInput.focus();
+  return true;
 }
 
 export async function renderLog(root) {

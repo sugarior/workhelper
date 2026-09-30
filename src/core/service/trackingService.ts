@@ -8,10 +8,10 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { withTx } from '../db/index.ts';
 import {
-  applyStatus, countPendingInbox, createProgress, deleteProgress, getSubtask, getTask,
-  indexEntity, latestBlockerForTask, listCompletedBetween, listProgressForTarget, listProgressForTaskTree,
-  listSubtasks, listTasks, listTasksByStatuses, removeEntity, setPlannedFor,
-  OPEN_TASK_STATUSES,
+  applyStatus, clearFocus, countPendingInbox, createProgress, deleteProgress, findFocusedTask,
+  getSubtask, getTask, indexEntity, latestBlockerForTask, listCompletedBetween,
+  listProgressForTarget, listProgressForTaskTree, listSubtasks, listTasks, listTasksByStatuses,
+  removeEntity, setFocus, setPlannedFor, OPEN_TASK_STATUSES,
 } from '../repo/index.ts';
 import { getDayBoundaryHour } from '../repo/settingsRepo.ts';
 import { dayKeyFromIso, nowIso } from '../domain/clock.ts';
@@ -124,6 +124,18 @@ export interface TrackingService {
   openTasksView(dayKey?: string): OpenTasksView;
   /** 已完成总览（F-09b）。按完成日倒序分组，含任务与子任务 */
   completedView(range: CompletedRange): CompletedView;
+  /** 当前焦点任务（F-15b）。跨日后惰性清空；无焦点返回 null */
+  focus(): Task | null;
+  /** 聚焦：`todo` 会先转 `doing`；自动顶掉旧焦点。返回新的焦点任务 */
+  focusTask(taskId: string): Task;
+  /** 取消聚焦 */
+  unfocus(): void;
+  /**
+   * 「记一笔」：给当前焦点任务追加一条进展（F-15c）。
+   * 没有焦点时抛错 —— 让"记到哪"永远有明确答案，而不是猜一个目标。
+   */
+  noteOnFocus(input: { kind: ProgressKind; body: string }): { entry: ProgressEntry; task: Task };
+
   addToToday(taskId: string, dayKey?: string): Task;
   removeFromToday(taskId: string): Task;
   /** 快速把任务推进到"进行中" */
@@ -165,6 +177,8 @@ export function createTrackingService(database: DatabaseSync): TrackingService {
       completedAt: completionStamp(next, current.completedAt, at),
       blockedReason,
     });
+    // 焦点清理已下沉到仓储层的 applyStatus（那里覆盖所有改状态的路径），
+    // 这里不再重复，避免两处规则再次分叉。
     indexEntity(database, { entityType: 'task', entityId: task.id, title: task.title, body: task.detail ?? '' });
     return task;
   }
@@ -198,41 +212,54 @@ export function createTrackingService(database: DatabaseSync): TrackingService {
     }
   }
 
+  /**
+   * 追加进展的公共实现。「记一笔」与「任务行内记一笔」共用它，
+   * 避免两套逻辑分叉（尤其是"卡点联动状态"这条规则）。
+   * 调用方负责事务边界。
+   */
+  function addProgressCore(input: {
+    target: ProgressTarget;
+    kind: ProgressKind;
+    body: string;
+    occurredAt?: string;
+    dayKey?: string;
+  }): { entry: ProgressEntry; task?: Task } {
+    const body = assertNonEmptyText(input.body, '进展内容');
+    assertTargetExists(input.target);
+    // 只有挂在任务上的记录需要拦终态；直接挂项目的记录没有对应任务
+    if (input.target.kind === 'task') assertTaskNotTerminal(input.target.id);
+
+    const at = input.occurredAt ?? nowIso();
+    const dayKey = input.dayKey ?? dayKeyFromIso(at, boundaryHour());
+    const entry = createProgress(database, {
+      target: input.target,
+      kind: input.kind,
+      body,
+      dayKey,
+      occurredAt: at,
+    });
+
+    indexEntity(database, {
+      entityType: 'progress',
+      entityId: entry.id,
+      title: '',
+      body,
+    });
+
+    // 状态联动：只有卡点会改任务状态
+    let task: Task | undefined;
+    if (input.kind === 'blocker' && input.target.kind === 'task') {
+      const current = getTask(database, input.target.id);
+      if (current !== undefined && current.status !== 'blocked') {
+        task = applyTaskStatus(input.target.id, 'blocked', { blockedReason: body });
+      }
+    }
+    return task === undefined ? { entry } : { entry, task };
+  }
+
   return {
     addProgress(input) {
-      const body = assertNonEmptyText(input.body, '进展内容');
-      assertTargetExists(input.target);
-      // 只有挂在任务上的记录需要拦终态；直接挂项目的记录没有对应任务
-      if (input.target.kind === 'task') assertTaskNotTerminal(input.target.id);
-
-      return withTx(database, () => {
-        const at = input.occurredAt ?? nowIso();
-        const dayKey = input.dayKey ?? dayKeyFromIso(at, boundaryHour());
-        const entry = createProgress(database, {
-          target: input.target,
-          kind: input.kind,
-          body,
-          dayKey,
-          occurredAt: at,
-        });
-
-        indexEntity(database, {
-          entityType: 'progress',
-          entityId: entry.id,
-          title: '',
-          body,
-        });
-
-        // 状态联动：只有卡点会改任务状态
-        let task: Task | undefined;
-        if (input.kind === 'blocker' && input.target.kind === 'task') {
-          const current = getTask(database, input.target.id);
-          if (current !== undefined && current.status !== 'blocked') {
-            task = applyTaskStatus(input.target.id, 'blocked', { blockedReason: body });
-          }
-        }
-        return task === undefined ? { entry } : { entry, task };
-      });
+      return withTx(database, () => addProgressCore(input));
     },
 
     timeline(target, options = {}) {
@@ -387,6 +414,80 @@ export function createTrackingService(database: DatabaseSync): TrackingService {
           all: entries.length,
         },
       };
+    },
+
+    /**
+     * 当前焦点任务（需求 §5.2.1）。
+     *
+     * **每日日界自动清空**用惰性判断实现，而不是后台定时器：
+     * 聚焦时记下当时的日键，读取时与今天的日键比较，不同就视为无焦点并顺手清掉。
+     * 这样不需要定时任务，也天然处理"服务跨夜没运行""机器关机一整晚"等情况。
+     */
+    focus() {
+      const focused = findFocusedTask(database);
+      if (focused === undefined) return null;
+      if (focused.focusedDayKey !== keyOf(new Date())) {
+        clearFocus(database);
+        return null;
+      }
+      return focused;
+    },
+
+    /**
+     * 聚焦（F-15b）。
+     *
+     * 两条硬规则：
+     *  1. 焦点**只能落在 `doing`** 上（用户明确要求）—— 这让焦点不贬值，
+     *     它始终意味着"这件事真的在推进"，而不是"我看过它"。
+     *     因此对 `todo` 任务聚焦时**自动先转 doing**：聚焦与开始本来就是同一个动作。
+     *  2. 切到新焦点时旧焦点自动顶掉（仓储层保证全库唯一）。
+     */
+    focusTask(taskId) {
+      return withTx(database, () => {
+        const task = getTask(database, taskId);
+        if (task === undefined) throw new InvalidTransitionError(`任务不存在：${taskId}`);
+        assertTaskNotTerminal(taskId);
+
+        // 先补齐状态，再设焦点，顺序不能反：
+        // 若先设焦点再转状态，中间态会违反"焦点只在 doing 上"的约束。
+        const ready = task.status === 'todo' ? applyTaskStatus(taskId, 'doing') : task;
+        if (ready.status !== 'doing') {
+          throw new InvalidTransitionError(
+            `只有「进行中」的任务才能聚焦，当前是 ${ready.status}。请先解除阻塞或重开任务。`,
+          );
+        }
+        return setFocus(database, taskId, keyOf(new Date()));
+      });
+    },
+
+    unfocus() {
+      withTx(database, () => {
+        clearFocus(database);
+      });
+    },
+
+    /**
+     * 记一笔（F-15c）：给当前焦点任务追加进展。
+     *
+     * 没有焦点时**明确报错**，而不是随便挑一条任务写进去 ——
+     * "记到哪"必须永远有确切答案（需求 §5.2.1）。
+     */
+    noteOnFocus(input) {
+      return withTx(database, () => {
+        const focused = findFocusedTask(database);
+        if (focused === undefined || focused.focusedDayKey !== keyOf(new Date())) {
+          if (focused !== undefined) clearFocus(database);
+          throw new InvalidTransitionError('当前没有正在做的任务，先去「全部」里对一条任务点聚焦');
+        }
+        // 与任务行内记一笔共用同一个实现，规则不会分叉
+        const result = addProgressCore({
+          target: { kind: 'task', id: focused.id },
+          kind: input.kind,
+          body: input.body,
+        });
+        // 只有"卡点"才会联动返回新任务；其余类型返回记录前的任务本身
+        return { entry: result.entry, task: result.task ?? focused };
+      });
     },
 
     addToToday(taskId, dayKey) {

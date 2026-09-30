@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
@@ -24,10 +24,15 @@
     </div>
   </header>
 
+  <!-- 焦点常驻条（需求 F-15b / F-15c）：被打断后回来，一眼看到"我刚才在做哪件"。
+       它同时是「记一笔」的入口 —— 聚焦之后记进展不需要先找到任务。
+       Ctrl+Shift+Space 会把光标直接送到这里的输入框。 -->
+  <div class="focus-bar" id="focus-bar"></div>
+
   <main id="view"></main>
 
   <!-- 带版本参数：换了版本号浏览器就会重新拉取，即使此前缓存过。
        服务端同时发送 no-cache，两者叠加确保改完前端必定生效。 -->
-  <script type="module" src="/app.js?v=0.1.0"></script>
+  <script type="module" src="/app.js?v=0.2.0"></script>
 </body>
 </html>

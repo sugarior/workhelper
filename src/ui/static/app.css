@@ -110,16 +110,17 @@ nav.tabs button.active { background: var(--accent-soft); color: var(--accent); f
 
 /* ---------- 「更多 ▾」下拉菜单 ---------- */
 /* 低频动作收进菜单，主按钮保持一眼可辨。每个菜单项带一行说明，
-   因为「丢弃 / 删除 / 转项目」语义相近，只靠名字容易点错。 */
-.menu { position: relative; display: inline-block; }
+   因为「丢弃 / 删除 / 转项目」语义相近，只靠名字容易点错。
+   面板用 position: fixed（坐标由 JS 算）：列表容器 ul.list 有 overflow: hidden
+   用来裁圆角，absolute 定位的浮层会被它裁掉，导致选项点不到。 */
+.menu { display: inline-block; }
 .menu-trigger { white-space: nowrap; }
 .menu-panel {
   display: none;
-  position: absolute;
-  right: 0;
-  top: calc(100% + 4px);
-  z-index: 30;
+  position: fixed;
+  z-index: 60;
   min-width: 260px;
+  max-width: 320px;
   padding: 4px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -144,6 +145,27 @@ nav.tabs button.active { background: var(--accent-soft); color: var(--accent); f
 
 .search-box { margin-left: auto; display: flex; gap: 6px; align-items: center; }
 .search-box input { width: 200px; }
+
+/* ---------- 焦点常驻条（需求 F-15b / F-15c） ---------- */
+/* 回答"我刚才在做哪件"。它是「记一笔」的唯一入口形态：
+   展开后就是类型下拉 + 输入框，与任务行内的记一笔一致。 */
+.focus-bar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+  position: sticky;
+  top: 49px;
+  z-index: 20;
+}
+.focus-bar.idle { color: var(--text-dim); }
+.focus-bar .focus-label { color: var(--text-dim); font-size: 12px; white-space: nowrap; }
+.focus-bar .focus-title { font-weight: 600; }
+.focus-bar .focus-path { color: var(--text-dim); font-size: 12px; }
+.focus-bar input[type="text"] { flex: 1; min-width: 220px; }
 
 input[type="text"], input[type="search"], textarea, select {
   background: var(--bg-raised);

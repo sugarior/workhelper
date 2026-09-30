@@ -115,6 +115,14 @@ export interface Task {
   completedAt: string | null;
   sortOrder: number;
   sourceInboxId: string | null;
+  /**
+   * 焦点：不为 null 表示"我现在正在推进这一件"（需求 §5.2.1）。
+   * **全库最多一条**，由迁移 005 的部分唯一索引在数据库层保证；
+   * 且**只允许落在 `doing` 的任务上**（服务层校验）。
+   */
+  focusedAt: string | null;
+  /** 聚焦当时的日键，用于"每日日界自动清空"的惰性判断 */
+  focusedDayKey: string | null;
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;

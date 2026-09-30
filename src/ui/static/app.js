@@ -2,13 +2,17 @@
 // 各页签的渲染在 views.js 里，本文件只负责"现在显示哪一页"。
 
 import { api } from '/api.js';
-import { el, mount, shortId } from '/dom.js';
-import { renderInbox, renderAll, renderToday, renderProjects, renderLog, setRefreshHook } from '/views.js';
+import { el, mount, shortId, flash } from '/dom.js';
+import {
+  renderInbox, renderAll, renderToday, renderProjects, renderLog,
+  renderFocusBar, focusNoteInput, setRefreshHook,
+} from '/views.js';
 
 const viewBox = document.getElementById('view');
 const tabsBox = document.getElementById('tabs');
 const inboxBadge = document.getElementById('badge-inbox');
 const openBadge = document.getElementById('badge-open');
+const focusBar = document.getElementById('focus-bar');
 const searchInput = document.getElementById('search');
 
 const RENDERERS = {
@@ -69,6 +73,8 @@ async function render(tab) {
     mount(viewBox, el('div', { class: 'empty' }, `加载失败：${error.message}`));
   }
   void refreshBadges();
+  // 焦点条要跟着刷新：任务可能在这里被聚焦/完成/卡住，焦点也就变了
+  void renderFocusBar(focusBar, refresh);
 }
 
 tabsBox.addEventListener('click', (event) => {
@@ -128,18 +134,28 @@ searchInput.addEventListener('keydown', (event) => {
 });
 
 // ---------- 快捷键 ----------
-
+//
+// 注：这三个都是**浏览器内**快捷键，只在页面有焦点时有效。
+// 真正的全局热键要等 M1 的 Tauri 外壳（浏览器无法做到不抢焦点）。
 document.addEventListener('keydown', (event) => {
-  // Ctrl+K 聚焦搜索；Ctrl+Alt+Space 在 M1 由系统级热键接管，这里先给浏览器内一个入口
+  // Ctrl+K 聚焦搜索
   if (event.ctrlKey && event.key.toLowerCase() === 'k') {
     event.preventDefault();
     searchInput.focus();
     searchInput.select();
     return;
   }
+  // Ctrl+Alt+Space：速记板 —— "冒出个新想法"，新建收件箱条目
   if (event.ctrlKey && event.altKey && event.code === 'Space') {
     event.preventDefault();
     window.open('/capture', 'wh-capture', 'width=680,height=330,menubar=no,toolbar=no');
+    return;
+  }
+  // Ctrl+Shift+Space：记一笔 —— "刚才做的这件事有进展"，记到当前焦点任务（F-15c）
+  // 与速记板刻意分开：混在一起会把新想法误记到当前任务上。
+  if (event.ctrlKey && event.shiftKey && event.code === 'Space') {
+    event.preventDefault();
+    if (!focusNoteInput()) flash('还没有聚焦的任务，先去「全部」里对一条任务点「聚焦」', 'error');
   }
 });
 
