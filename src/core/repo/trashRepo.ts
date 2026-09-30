@@ -103,31 +103,31 @@ export function countTrash(database: DatabaseSync): number {
   return total;
 }
 
-// ---------- 「已丢弃」（需求 F-21b） ----------
+// ---------- 「已忽略」（需求 F-21b） ----------
 //
 // 与「已删除」是**两条独立的查询路径**，绝不能合并：
 //   · 已删除 → deleted_at IS NOT NULL
-//   · 已丢弃 → status = 'archived' 且 deleted_at 仍为 NULL
+//   · 已忽略 → status = 'archived' 且 deleted_at 仍为 NULL
 // 上面每个查询都硬编码了 deleted_at IS NOT NULL，因此丢弃的条目
 // **永远不可能出现在回收站列表里** —— 这正是"丢弃曾是单向门"的成因（缺陷 R14）。
 // 把两种语义硬塞进同一个条件，只会让它们继续互相污染。
 
-export interface DiscardedEntry {
+export interface IgnoredEntry {
   id: string;
   title: string;
-  /** 丢进"已丢弃"的时刻 */
-  discardedAt: string;
+  /** 丢进"已忽略"的时刻 */
+  ignoredAt: string;
   /** 原文（有日期被剥离时才有），便于确认丢的是不是这条 */
   rawInput: string | null;
 }
 
 /**
- * 列出已丢弃的收件箱条目，最近丢弃的在前。
+ * 列出已忽略的收件箱条目，最近忽略的在前。
  *
- * **不过期**：丢弃是"我主动筛掉的"，自动删除等于悄悄抹掉我的判断记录；
+ * **不过期**：忽略是"我主动筛掉的"，自动删除等于悄悄抹掉我的判断记录；
  * 回收站里的东西才是"我不小心弄掉的"，那才需要自动兜底。
  */
-export function listDiscardedInbox(database: DatabaseSync, limit = 500): DiscardedEntry[] {
+export function listIgnoredInbox(database: DatabaseSync, limit = 500): IgnoredEntry[] {
   const rows = queryAll<{ id: string; body: string; raw_input: string | null; updated_at: string }>(
     database,
     `SELECT id, body, raw_input, updated_at FROM inbox_items
@@ -139,20 +139,20 @@ export function listDiscardedInbox(database: DatabaseSync, limit = 500): Discard
   return rows.map((row) => ({
     id: row.id,
     title: row.body,
-    discardedAt: row.updated_at,
+    ignoredAt: row.updated_at,
     rawInput: row.raw_input,
   }));
 }
 
-export function countDiscardedInbox(database: DatabaseSync): number {
+export function countIgnoredInbox(database: DatabaseSync): number {
   const row = database
     .prepare(`SELECT COUNT(*) AS c FROM inbox_items WHERE status = 'archived' AND deleted_at IS NULL`)
     .get() as { c: number } | undefined;
   return Number(row?.c ?? 0);
 }
 
-/** 把丢弃的条目放回待处理（"捞回来"）。返回是否真的改了 */
-export function restoreDiscardedInbox(database: DatabaseSync, id: string): boolean {
+/** 把忽略的条目放回待处理（"捞回来"）。返回是否真的改了 */
+export function restoreIgnoredInbox(database: DatabaseSync, id: string): boolean {
   const result = execute(
     database,
     `UPDATE inbox_items SET status = 'pending', updated_at = ?
@@ -163,8 +163,8 @@ export function restoreDiscardedInbox(database: DatabaseSync, id: string): boole
   return result.changes > 0;
 }
 
-/** 彻底删除一条已丢弃的收件箱条目（物理删除，不可恢复） */
-export function purgeDiscardedInbox(database: DatabaseSync, id: string): boolean {
+/** 彻底删除一条已忽略的收件箱条目（物理删除，不可恢复） */
+export function purgeIgnoredInbox(database: DatabaseSync, id: string): boolean {
   const result = execute(
     database,
     `DELETE FROM inbox_items WHERE id = ? AND status = 'archived' AND deleted_at IS NULL`,

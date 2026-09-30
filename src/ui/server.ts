@@ -1,4 +1,4 @@
-// 本地 HTTP 服务：给图形界面提供通路（M0 的界面形态）。
+﻿// 本地 HTTP 服务：给图形界面提供通路（M0 的界面形态）。
 //
 // 安全边界（设计 §7.1）：
 //  - 只绑 127.0.0.1，不引入任何外部可达面
@@ -68,7 +68,7 @@ const ALLOWED: Readonly<Record<string, readonly string[]>> = {
   journal: ['summarize', 'save'],
   search: ['search'],
   system: ['getSettings', 'backup', 'integrityCheck', 'parseDueInput',
-    'trashOverview', 'restoreDiscarded', 'purgeDiscarded', 'restoreTrash', 'purgeTrash'],
+    'trashOverview', 'restoreIgnored', 'purgeIgnored', 'restoreTrash', 'purgeTrash'],
 };
 
 function sendJson(response: ServerResponse, status: number, payload: unknown): void {

@@ -1,4 +1,4 @@
-// 界面与内核之间唯一的通路：调用服务门面的 HTTP 包装。
+﻿// 界面与内核之间唯一的通路：调用服务门面的 HTTP 包装。
 //
 // 关于参数形状（本项目反复踩坑的地方，务必读完）：
 // 内核服务方法的签名不统一——有的收一个选项对象，有的收位置参数，
@@ -70,10 +70,10 @@ export const api = {
   parseDueInput: (raw) => call('system', 'parseDueInput', raw),
 
   // ---------- 回收站（F-21b） ----------
-  // 一次拿到「已删除」与「已丢弃」两个筛选的列表与计数，省掉四次往返。
+  // 一次拿到「已删除」与「已忽略」两个筛选的列表与计数，省掉四次往返。
   trashOverview: () => call('system', 'trashOverview'),
-  restoreDiscarded: (id) => call('system', 'restoreDiscarded', id),
-  purgeDiscarded: (id) => call('system', 'purgeDiscarded', id),
+  restoreIgnored: (id) => call('system', 'restoreIgnored', id),
+  purgeIgnored: (id) => call('system', 'purgeIgnored', id),
   restoreTrash: (entityType, entityId) => call('system', 'restoreTrash', [entityType, entityId]),
   purgeTrash: (entityType, entityId) => call('system', 'purgeTrash', [entityType, entityId]),
 

@@ -1,4 +1,4 @@
-// 服务层统一出口。界面层只通过这里访问业务能力，
+﻿// 服务层统一出口。界面层只通过这里访问业务能力，
 // 不直接接触 repo/ 或 db/（docs/design.md §2.2 分层纪律）。
 
 import { join } from 'node:path';
@@ -57,4 +57,4 @@ export type { TrackingService, TodayView, OpenTasksView } from './trackingServic
 export type { JournalService, JournalSummary, CompletedSubtask } from './journalService.ts';
 export type { SearchService, ResolvedHit } from './searchService.ts';
 export type { SystemService, BackupFile, IntegrityReport } from './systemService.ts';
-export type { TrashEntry, DiscardedEntry } from '../repo/trashRepo.ts';
+export type { TrashEntry, IgnoredEntry } from '../repo/trashRepo.ts';

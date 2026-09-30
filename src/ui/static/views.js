@@ -1,4 +1,4 @@
-// 四个页签的渲染逻辑：收件箱 / 今日 / 项目 / 日志。
+﻿// 四个页签的渲染逻辑：收件箱 / 今日 / 项目 / 日志。
 //
 // 这里只做「取数 → 渲染 → 收集输入 → 调接口 → 重绘」，
 // 任何业务判断（能否流转、是否阻塞、汇总口径）都在内核里。
@@ -1146,7 +1146,7 @@ export async function renderTrash(root) {
     el('button', {
       class: trashTab === 'ignored' ? 'primary' : '',
       onclick: () => { trashTab = 'ignored'; void reload(); },
-    }, `已忽略（${counts.discarded}）`),
+    }, `已忽略（${counts.ignored}）`),
     hasLegacyDeleted
       ? el('button', {
         class: trashTab === 'deleted' ? 'primary' : '',
@@ -1157,7 +1157,7 @@ export async function renderTrash(root) {
 
   const rows = trashTab === 'deleted'
     ? renderDeletedRows(overview.deleted, retentionDays, reload)
-    : renderIgnoredRows(overview.discarded, reload);
+    : renderIgnoredRows(overview.ignored, reload);
 
   const explain = trashTab === 'deleted'
     ? `这些是旧版本"删除"动作留下的记录，保留 ${retentionDays} 天后自动清理。恢复即回到原样。`
@@ -1228,7 +1228,7 @@ function renderIgnoredRows(entries, onChanged) {
       el('button', {
         title: '把这条放回收件箱继续整理',
         onclick: (event) => void withBusy(event.target, async () => {
-          await api.restoreDiscarded(entry.id);
+          await api.restoreIgnored(entry.id);
           flash('已放回待处理');
           await onChanged();
         }),
@@ -1241,7 +1241,7 @@ function renderIgnoredRows(entries, onChanged) {
             '· 这是物理删除，**无法恢复**\n' +
             '· 若只是不想让它占地方，其实可以留着 —— 忽略的内容不过期，也还能被搜到',
           )) return;
-          await api.purgeDiscarded(entry.id);
+          await api.purgeIgnored(entry.id);
           flash('已彻底删除');
           await onChanged();
         }),

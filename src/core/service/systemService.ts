@@ -9,16 +9,16 @@ import { backup } from 'node:sqlite';
 import type { DatabaseSync } from 'node:sqlite';
 import { withTx } from '../db/index.ts';
 import {
-  countDiscardedInbox, countTrash, findBlockedWithoutReason, findDoneWithoutTimestamp,
-  listDiscardedInbox, listSettings, listTrash, purgeDiscardedInbox, purgeExpired, purgeOne,
-  restore, restoreDiscardedInbox, setDayBoundaryHour, setSetting,
+  countIgnoredInbox, countTrash, findBlockedWithoutReason, findDoneWithoutTimestamp,
+  listIgnoredInbox, listSettings, listTrash, purgeIgnoredInbox, purgeExpired, purgeOne,
+  restore, restoreIgnoredInbox, setDayBoundaryHour, setSetting,
   getDayBoundaryHour, getSetting, TRASH_RETENTION_DAYS,
 } from '../repo/index.ts';
 import { NotFoundError, ValidationError } from '../domain/errors.ts';
 import { parseDueInput } from '../day/parseDate.ts';
 import { todayKey } from '../day/dayKey.ts';
 import type { EntityType } from '../domain/types.ts';
-import type { DiscardedEntry, TrashEntry } from '../repo/trashRepo.ts';
+import type { IgnoredEntry, TrashEntry } from '../repo/trashRepo.ts';
 
 /** 备份保留策略：最近 7 个日快照 + 4 个周快照 */
 export const BACKUP_KEEP_DAILY = 7;
@@ -70,7 +70,7 @@ export interface SystemService {
   /**
    * 回收站页需要的**扁平**查询（F-21b，供 HTTP 层）。
    *
-   * 为什么单独做扁平方法，而不是让界面去调 `trash` / `trash.discarded`：
+   * 为什么单独做扁平方法，而不是让界面去调 `trash` / `trash.ignored`：
    * 接口层按 `/api/<服务>/<方法>` 调用**顶层方法名**，因此嵌套对象根本调不到。
    * 而把 `trash` 整个拍平会连带改掉 CLI 的 7 处调用 —— 不划算。
    * 因此只给界面需要的部分开扁平入口，`trash` 对象保留给 CLI。
@@ -80,16 +80,16 @@ export interface SystemService {
   trashOverview(): {
     /** 已删除：误录纠正，30 天后自动清理 */
     deleted: TrashEntry[];
-    /** 已丢弃：主动判断，不过期 */
-    discarded: DiscardedEntry[];
-    counts: { deleted: number; discarded: number };
+    /** 已忽略：主动判断，不过期 */
+    ignored: IgnoredEntry[];
+    counts: { deleted: number; ignored: number };
     retentionDays: number;
   };
 
-  /** 已丢弃的条目放回待处理（"捞回来"） */
-  restoreDiscarded(id: string): void;
-  /** 彻底删除一条已丢弃条目（物理删除，不可恢复） */
-  purgeDiscarded(id: string): void;
+  /** 已忽略的条目放回待处理（"捞回来"） */
+  restoreIgnored(id: string): void;
+  /** 彻底删除一条已忽略条目（物理删除，不可恢复） */
+  purgeIgnored(id: string): void;
   /** 恢复一条已删除的实体（回收站"已删除"筛选） */
   restoreTrash(entityType: EntityType, entityId: string): void;
   /** 彻底删除一条已删除的实体（物理删除，不可恢复） */
@@ -108,11 +108,11 @@ export interface SystemService {
     purgeExpired(): Record<string, number>;
     retentionDays: number;
     /**
-     * 已丢弃：主动判断，**不过期**（需求 F-21b / 硬规则 D2）。
+     * 已忽略：主动判断，**不过期**（需求 F-21b / 硬规则 D2）。
      * 与"已删除"是两条独立路径，见 trashRepo 里的说明。
      */
-    discarded: {
-      list(): DiscardedEntry[];
+    ignored: {
+      list(): IgnoredEntry[];
       count(): number;
       /** 放回待处理（"捞回来"） */
       restore(id: string): void;
@@ -203,26 +203,26 @@ export function createSystemService(database: DatabaseSync, backupDir: string): 
 
     trashOverview: () => ({
       deleted: listTrash(database),
-      discarded: listDiscardedInbox(database),
+      ignored: listIgnoredInbox(database),
       counts: {
         deleted: countTrash(database),
-        discarded: countDiscardedInbox(database),
+        ignored: countIgnoredInbox(database),
       },
       retentionDays: TRASH_RETENTION_DAYS,
     }),
 
-    restoreDiscarded(id) {
+    restoreIgnored(id) {
       withTx(database, () => {
-        if (!restoreDiscardedInbox(database, id)) {
-          throw new NotFoundError(`这条已丢弃的记录不存在或已被放回：${id}`);
+        if (!restoreIgnoredInbox(database, id)) {
+          throw new NotFoundError(`这条已忽略的记录不存在或已被放回：${id}`);
         }
       });
     },
 
-    purgeDiscarded(id) {
+    purgeIgnored(id) {
       withTx(database, () => {
-        if (!purgeDiscardedInbox(database, id)) {
-          throw new NotFoundError(`这条已丢弃的记录不存在或已被放回：${id}`);
+        if (!purgeIgnoredInbox(database, id)) {
+          throw new NotFoundError(`这条已忽略的记录不存在或已被放回：${id}`);
         }
       });
     },
@@ -334,19 +334,19 @@ export function createSystemService(database: DatabaseSync, backupDir: string): 
       purgeExpired: () => withTx(database, () => purgeExpired(database)),
       retentionDays: TRASH_RETENTION_DAYS,
 
-      // 已丢弃：与上面「已删除」并列的第二个筛选（需求 F-21b）。
-      // 它不参与 purgeExpired —— 丢弃不过期（硬规则 D2）。
-      discarded: {
-        list: () => listDiscardedInbox(database),
-        count: () => countDiscardedInbox(database),
+      // 已忽略：回收站的**主**筛选（需求 F-21b）。「已删除」只是历史遗留。
+      // 它不参与 purgeExpired —— 忽略不过期（硬规则 D2）。
+      ignored: {
+        list: () => listIgnoredInbox(database),
+        count: () => countIgnoredInbox(database),
         restore: (id) => withTx(database, () => {
-          if (!restoreDiscardedInbox(database, id)) {
-            throw new NotFoundError(`这条已丢弃的记录不存在或已被放回：${id}`);
+          if (!restoreIgnoredInbox(database, id)) {
+            throw new NotFoundError(`这条已忽略的记录不存在或已被放回：${id}`);
           }
         }),
         purge: (id) => withTx(database, () => {
-          if (!purgeDiscardedInbox(database, id)) {
-            throw new NotFoundError(`这条已丢弃的记录不存在或已被放回：${id}`);
+          if (!purgeIgnoredInbox(database, id)) {
+            throw new NotFoundError(`这条已忽略的记录不存在或已被放回：${id}`);
           }
         }),
       },

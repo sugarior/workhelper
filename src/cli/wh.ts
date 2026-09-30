@@ -200,7 +200,7 @@ function commandInbox(context: CliContext): void {
     const raw = item.rawInput === null ? '' : `  [原文: ${clip(item.rawInput, 24)}]`;
     console.log(`  ${String(index + 1).padStart(2)}. ${shortId(item.id)}  ${clip(item.body)}${due}${raw}`);
   });
-  console.log('\n用 task <id> 转成任务，archive <id> 存为资料，discard <id...> 丢弃');
+  console.log('\n用 task <id> 转成任务，archive <id> 存为资料，discard <id...> 忽略');
 }
 
 function buildClassifyTarget(
