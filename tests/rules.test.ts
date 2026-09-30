@@ -15,6 +15,7 @@ import type { TaskStatus } from '../src/core/domain/types.ts';
 test('允许的状态流转', () => {
   const allowed: [TaskStatus, TaskStatus][] = [
     ['todo', 'doing'],
+    ['todo', 'blocked'],
     ['todo', 'done'],
     ['todo', 'cancelled'],
     ['doing', 'todo'],
@@ -66,7 +67,7 @@ test('非法流转抛出领域错误并说明可选路径', () => {
 });
 
 test('允许的流转列表随状态变化', () => {
-  assert.deepEqual(allowedTransitions('todo'), ['doing', 'done', 'cancelled']);
+  assert.deepEqual(allowedTransitions('todo'), ['doing', 'blocked', 'done', 'cancelled']);
   assert.deepEqual(allowedTransitions('blocked'), ['doing', 'todo', 'cancelled']);
   assert.deepEqual(allowedTransitions('done'), ['doing', 'todo']);
 });
@@ -78,8 +79,11 @@ test('完成任务：已取消的任务不能直接完成', () => {
   assert.throws(() => statusAfterComplete('cancelled'), InvalidTransitionError);
 });
 
-test('加卡点：完成任务与已取消任务不接受卡点', () => {
+test('加卡点：todo 与 doing 都能转为阻塞，终态不接受卡点', () => {
+  // todo → blocked 必须允许：现实中"还没开始就被卡住"很常见（等外部依赖）。
+  // 若禁止，用户只能先假装"进行中"再卡住，状态就失真了。
   assert.equal(statusAfterBlocker('todo'), 'blocked');
+  assert.equal(canTransition('todo', 'blocked'), true, '状态机必须与 statusAfterBlocker 一致');
   assert.equal(statusAfterBlocker('doing'), 'blocked');
   assert.equal(statusAfterBlocker('blocked'), 'blocked');
   assert.throws(() => statusAfterBlocker('done'), InvalidTransitionError);

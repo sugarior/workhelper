@@ -62,7 +62,7 @@ const ALLOWED: Readonly<Record<string, readonly string[]>> = {
   planning: ['listProjects', 'projectTree', 'createProject', 'deleteProject',
     'listTasks', 'createTask', 'completeTask', 'reopenTask',
     'createSubtask', 'setSubtaskStatus', 'reorder'],
-  tracking: ['addProgress', 'taskTimeline', 'todayView', 'openTasksView', 'addToToday', 'removeFromToday',
+  tracking: ['addProgress', 'taskTimeline', 'todayView', 'openTasksView', 'completedView', 'addToToday', 'removeFromToday',
     'startTask', 'blockTask', 'unblockTask', 'completeTask'],
   journal: ['summarize', 'save'],
   search: ['search'],

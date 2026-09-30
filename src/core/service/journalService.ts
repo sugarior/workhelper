@@ -8,13 +8,14 @@ import type { DatabaseSync } from 'node:sqlite';
 import { withTx } from '../db/index.ts';
 import {
   deleteDailyLog, getDailyLog, listArchivesCreatedBetween, listDailyLogs,
-  listInboxCreatedBetween, listOpenTasksDueOnOrBefore, listProgressByDay,
+  listInboxCreatedBetween, listOpenTasksDueOnOrBefore, listProgressByDayWithContext,
   listSubtasksCompletedBetween, listTasksCompletedBetween, listTasksCreatedBetween,
   saveDailyLog,
 } from '../repo/index.ts';
 import { getDayBoundaryHour } from '../repo/settingsRepo.ts';
 import { createIndexer } from './indexer.ts';
 import { dayRange } from '../day/dayKey.ts';
+import type { ProgressWithContext } from '../repo/progressRepo.ts';
 import type { ArchiveItem, DailyLog, InboxItem, ProgressEntry, Subtask, Task } from '../domain/types.ts';
 
 export interface CompletedSubtask {
@@ -34,10 +35,13 @@ export interface JournalSummary {
   createdArchives: ArchiveItem[];
   /** 到期日早于当天且仍未结束的任务（顺延项） */
   carriedOver: Task[];
-  /** 当天的卡点记录 */
-  blockers: ProgressEntry[];
-  /** 当天的全部进展记录，按时间正序 */
-  timeline: ProgressEntry[];
+  /**
+   * 当天的卡点记录。**带上下文**：需求 F-20 要求每条都能看出属于哪个项目与任务，
+   * 否则多个任务并行时"等法务确认"看不出是哪件事的卡点。
+   */
+  blockers: ProgressWithContext[];
+  /** 当天的全部进展记录，按时间正序；同样带上下文 */
+  timeline: ProgressWithContext[];
   /** 已保存的手工正文 */
   log: DailyLog | null;
   counts: { completed: number; created: number; blockers: number; carriedOver: number };
@@ -70,7 +74,10 @@ export function createJournalService(database: DatabaseSync): JournalService {
       // 进展记录按**归属日**取，不按真实时刻区间：
       // 补录一条"三天前做的事"时 day_key 是那一天而 occurred_at 是现在，
       // 若按时间区间查询，这条记录会被错误地排除在所属日期之外。
-      const timeline = listProgressByDay(database, dayKey);
+      //
+      // 用 WithContext 版本：需求 F-20 要求每条进展与卡点都能看出属于哪件事，
+      // 而 progress_entries 只存外键没有名字，必须在这里补齐上下文。
+      const timeline = listProgressByDayWithContext(database, dayKey);
       const blockers = timeline.filter((entry) => entry.kind === 'blocker');
       const carriedOver = listOpenTasksDueOnOrBefore(database, dayKey).filter(
         (task) => task.dueDate !== null && task.dueDate < dayKey,

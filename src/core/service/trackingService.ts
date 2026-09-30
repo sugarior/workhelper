@@ -9,17 +9,22 @@ import type { DatabaseSync } from 'node:sqlite';
 import { withTx } from '../db/index.ts';
 import {
   applyStatus, countPendingInbox, createProgress, deleteProgress, getSubtask, getTask,
-  indexEntity, latestBlockerForTask, listProgressForTarget, listProgressForTaskTree,
+  indexEntity, latestBlockerForTask, listCompletedBetween, listProgressForTarget, listProgressForTaskTree,
   listSubtasks, listTasks, listTasksByStatuses, removeEntity, setPlannedFor,
   OPEN_TASK_STATUSES,
-} from '../repo/index.ts';import { getDayBoundaryHour } from '../repo/settingsRepo.ts';
+} from '../repo/index.ts';
+import { getDayBoundaryHour } from '../repo/settingsRepo.ts';
 import { dayKeyFromIso, nowIso } from '../domain/clock.ts';
-import { dayRange, todayKey } from '../day/dayKey.ts';
+import { addDaysToKey, dayRange, todayKey } from '../day/dayKey.ts';
 import {
   assertBlockerReason, assertCanTransition, assertNonEmptyText, completionStamp,
 } from '../domain/rules.ts';
-import { InvalidTransitionError } from '../domain/errors.ts';
+import { InvalidTransitionError, ValidationError } from '../domain/errors.ts';
+import type { CompletedEntry } from '../repo/completedRepo.ts';
 import type { ProgressEntry, ProgressKind, ProgressTarget, Task } from '../domain/types.ts';
+
+/** 日键形状校验：completedView 的自定义范围用它挡住脏输入 */
+const DAY_KEY_SHAPE = /^\d{4}-\d{2}-\d{2}$/;
 
 export interface TodayView {
   dayKey: string;
@@ -77,6 +82,30 @@ export const OPEN_TASK_GROUP_LABELS: Readonly<Record<OpenTaskGroup, string>> = {
   unscheduled: '没有排期',
 };
 
+/** 已完成总览的时间范围（F-09b） */
+export const COMPLETED_PRESETS = ['last7', 'all', 'custom'] as const;
+export type CompletedPreset = (typeof COMPLETED_PRESETS)[number];
+
+export interface CompletedRange {
+  preset: CompletedPreset;
+  /** preset = 'custom' 时必填，均为日键 */
+  fromDayKey?: string;
+  toDayKey?: string;
+}
+
+/**
+ * 已完成总览（F-09b）。
+ *
+ * 存在的理由：需求 P4 把"复盘是编的"列为核心痛点、G3 承诺"写日报是导出而不是回忆"，
+ * 但此前只有单天汇总（F-20），写周报仍要逐天翻日志。
+ */
+export interface CompletedView {
+  range: { fromDayKey: string | null; toDayKey: string; preset: CompletedPreset };
+  /** 按完成日倒序分组；界面直接用日期作小标题 */
+  groups: { dayKey: string; entries: CompletedEntry[] }[];
+  total: { tasks: number; subtasks: number; all: number };
+}
+
 export interface TrackingService {
   addProgress(input: {
     target: ProgressTarget;
@@ -93,6 +122,8 @@ export interface TrackingService {
   todayView(dayKey?: string): TodayView;
   /** 全部未结束任务，按可操作性分组（F-09）。任何未结束任务都必须出现在这里 */
   openTasksView(dayKey?: string): OpenTasksView;
+  /** 已完成总览（F-09b）。按完成日倒序分组，含任务与子任务 */
+  completedView(range: CompletedRange): CompletedView;
   addToToday(taskId: string, dayKey?: string): Task;
   removeFromToday(taskId: string): Task;
   /** 快速把任务推进到"进行中" */
@@ -299,6 +330,62 @@ export function createTrackingService(database: DatabaseSync): TrackingService {
         blocked,
         total: open.length,
         overdueCount: overdue.length,
+      };
+    },
+
+    /**
+     * 已完成总览（F-09b）。
+     *
+     * 时间换算要点：完成时刻是**真实时刻**，所以区间必须按日界换算成本地日区间，
+     * 不能直接把日键当字符串比较（否则凌晨 2 点完成的任务会被算进前一天）。
+     * 上界取"今天日区间的结束"，这样今天的完成也算在内。
+     */
+    completedView(range) {
+      const today = keyOf(new Date());
+      const boundary = boundaryHour();
+
+      let fromDayKey: string | null;
+      if (range.preset === 'all') fromDayKey = null;
+      else if (range.preset === 'last7') fromDayKey = addDaysToKey(today, -6);
+      else fromDayKey = range.fromDayKey ?? today;
+      if (fromDayKey !== null && !DAY_KEY_SHAPE.test(fromDayKey)) {
+        throw new ValidationError(`起始日期格式应为 YYYY-MM-DD，收到：${fromDayKey}`);
+      }
+
+      const toDayKey = range.preset === 'custom' ? (range.toDayKey ?? today) : today;
+      if (!DAY_KEY_SHAPE.test(toDayKey)) {
+        throw new ValidationError(`结束日期格式应为 YYYY-MM-DD，收到：${toDayKey}`);
+      }
+      if (fromDayKey !== null && fromDayKey > toDayKey) {
+        throw new ValidationError(`起始日期不能晚于结束日期：${fromDayKey} > ${toDayKey}`);
+      }
+
+      const startIso = fromDayKey === null ? '0000-01-01T00:00:00.000Z' : dayRange(fromDayKey, boundary).start.toISOString();
+      const endIso = dayRange(toDayKey, boundary).end.toISOString();
+
+      const entries = listCompletedBetween(database, startIso, endIso);
+
+      // 按完成日（本地日界下的日键）分组，日期倒序
+      const grouped = new Map<string, CompletedEntry[]>();
+      for (const entry of entries) {
+        const dayKey = dayKeyFromIso(entry.completedAt, boundary);
+        const list = grouped.get(dayKey);
+        if (list === undefined) grouped.set(dayKey, [entry]);
+        else list.push(entry);
+      }
+
+      const groups = [...grouped.entries()]
+        .map(([dayKey, list]) => ({ dayKey, entries: list }))
+        .sort((a, b) => b.dayKey.localeCompare(a.dayKey));
+
+      return {
+        range: { fromDayKey, toDayKey, preset: range.preset },
+        groups,
+        total: {
+          tasks: entries.filter((entry) => entry.kind === 'task').length,
+          subtasks: entries.filter((entry) => entry.kind === 'subtask').length,
+          all: entries.length,
+        },
       };
     },
 

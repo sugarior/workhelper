@@ -8,11 +8,17 @@ import type { ProgressKind, TaskStatus } from './types.ts';
 /**
  * 任务允许的状态流转。允许自转（无变化则视为 no-op）。
  * 设计意图：
- *  - blocked 的进入与退出都必须经过 doing，避免"直接完成一个卡住的任务"这种失真记录。
+ *  - `blocked` 只能退到 `doing` 或 `todo`，**不能直接 `done`**：
+ *    避免"直接完成一个卡住的任务"这种失真记录。
+ *  - **`todo → blocked` 是允许的**：现实中"还没开始就被卡住"很常见
+ *    （等外部依赖、等对方回复）。若禁止，用户只能先假装"进行中"再卡住，
+ *    等于逼他填一个失真的状态。解除时 `blocked → todo` 正好回到"尚未开始"。
+ *    曾经这里禁止过 todo → blocked，但那与 `statusAfterBlocker` 的语义冲突
+ *    （见下），导致"加卡点"在 todo 任务上直接报错且不留下任何记录。
  *  - done / cancelled 是终态，需要显式解除才能回到流程（保留 cancelled，不自动清理）。
  */
 const TASK_TRANSITIONS: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
-  todo: ['doing', 'done', 'cancelled'],
+  todo: ['doing', 'blocked', 'done', 'cancelled'],
   doing: ['todo', 'blocked', 'done', 'cancelled'],
   blocked: ['doing', 'todo', 'cancelled'],
   done: ['doing', 'todo'],

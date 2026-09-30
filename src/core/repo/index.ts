@@ -7,6 +7,7 @@ export * from './progressRepo.ts';
 export * from './inboxRepo.ts';
 export * from './archiveRepo.ts';
 export * from './materialRepo.ts';
+export * from './completedRepo.ts';
 export * from './dailyLogRepo.ts';
 export * from './settingsRepo.ts';
 export * from './attachmentRepo.ts';

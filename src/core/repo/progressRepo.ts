@@ -128,6 +128,83 @@ export function listProgressByDay(database: DatabaseSync, dayKey: string): Progr
   return rows.map(toEntry);
 }
 
+/**
+ * 带上下文（项目 › 任务 › 子任务 名字）的当日进展。
+ *
+ * 为什么需要它（需求 R13 / F-20）：`progress_entries` 只存三个外键，**没有名字**，
+ * 因此日志里一条"等法务确认"看不出属于哪件事，多个任务并行时分不清。
+ *
+ * 三层名字用相关子查询一次取回，避免在 JS 里逐条回表（N+1）。
+ * 子任务上的进展要**沿 subtask → task → project 补齐上层**，
+ * 否则子任务的卡点会没有任何归属线索。
+ */
+export interface ProgressWithContext extends ProgressEntry {
+  projectTitle: string | null;
+  taskTitle: string | null;
+  subtaskTitle: string | null;
+}
+
+interface ContextRow extends ProgressRow {
+  project_title: string | null;
+  task_title: string | null;
+  task_project_id: string | null;
+  subtask_title: string | null;
+}
+
+/** 把三层名字拼成 `项目 › 任务 › 子任务`，有哪层显示哪层 */
+export function contextLabel(entry: Pick<ProgressWithContext, 'projectTitle' | 'taskTitle' | 'subtaskTitle'>): string | null {
+  const parts = [entry.projectTitle, entry.taskTitle, entry.subtaskTitle].filter(
+    (part): part is string => part !== null && part !== '',
+  );
+  return parts.length === 0 ? null : parts.join(' › ');
+}
+
+export function listProgressByDayWithContext(database: DatabaseSync, dayKey: string): ProgressWithContext[] {
+  const rows = queryAll<ContextRow>(
+    database,
+    `SELECT pe.*,
+       (SELECT p.title FROM projects p WHERE p.id = pe.project_id) AS project_title,
+       (SELECT t.title FROM tasks t
+          WHERE t.id = COALESCE(pe.task_id, (SELECT s.task_id FROM subtasks s WHERE s.id = pe.subtask_id))
+       ) AS task_title,
+       (SELECT t.project_id FROM tasks t
+          WHERE t.id = COALESCE(pe.task_id, (SELECT s.task_id FROM subtasks s WHERE s.id = pe.subtask_id))
+       ) AS task_project_id,
+       (SELECT s.title FROM subtasks s WHERE s.id = pe.subtask_id) AS subtask_title
+     FROM ${TABLE} pe
+     WHERE pe.day_key = ? AND pe.deleted_at IS NULL
+     ORDER BY pe.occurred_at ASC, pe.created_at ASC`,
+    dayKey,
+  );
+
+  // 子任务型/任务型进展本身没有 project_id，项目名要从所属任务补上来。
+  // 先收集"自己没写 project_id、但所属任务有"的那些项目 id，批量取名。
+  const missingProjectIds = new Set<string>();
+  for (const row of rows) {
+    if (row.project_id === null && row.task_project_id !== null) missingProjectIds.add(row.task_project_id);
+  }
+  const projectTitles = new Map<string, string>();
+  if (missingProjectIds.size > 0) {
+    const ids = [...missingProjectIds];
+    const placeholders = ids.map(() => '?').join(', ');
+    for (const row of queryAll<{ id: string; title: string }>(
+      database,
+      `SELECT id, title FROM projects WHERE id IN (${placeholders})`,
+      ...ids,
+    )) {
+      projectTitles.set(row.id, row.title);
+    }
+  }
+
+  return rows.map((row) => ({
+    ...toEntry(row),
+    projectTitle: row.project_title
+      ?? (row.task_project_id === null ? null : projectTitles.get(row.task_project_id) ?? null),
+    taskTitle: row.task_title,
+    subtaskTitle: row.subtask_title,
+  }));
+}
+
 /** 按真实时刻区间取进展（跨日界的精确汇总用） */
 export function listProgressBetween(database: DatabaseSync, startIso: string, endIso: string): ProgressEntry[] {
   const rows = queryAll<ProgressRow>(

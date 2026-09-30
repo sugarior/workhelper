@@ -75,6 +75,7 @@ export const api = {
   finishTask: (taskId) => call('tracking', 'completeTask', [taskId, {}]),
   addToToday: (taskId) => call('tracking', 'addToToday', taskId),
   removeFromToday: (taskId) => call('tracking', 'removeFromToday', taskId),
+  completedView: (range) => call('tracking', 'completedView', [range]),
 
   // ---------- 日志 ----------
   summarize: (dayKey) => call('journal', 'summarize', dayKey),

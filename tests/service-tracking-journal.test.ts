@@ -402,6 +402,52 @@ test('可见性契约：完成后立即从未结束视图消失，重开后回�
   });
 });
 
+test('加卡点：无需先"开始"，todo 任务直接卡住也留下记录', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+
+    // 现实中"还没开始就被卡住"很常见（等外部依赖、等对方回复）。
+    // 曾经状态机禁止 todo → blocked，导致这里直接报错**且进展记录一并回滚**：
+    // 用户既卡不住也留不下记录，只能先假装"进行中"——状态因此失真。
+    const task = planning.createTask({ title: '等对方给账号' });
+    assert.equal(task.status, 'todo');
+
+    const result = tracking.addProgress({
+      target: { kind: 'task', id: task.id },
+      kind: 'blocker',
+      body: '等对方开通权限',
+    });
+
+    assert.ok(result.task !== undefined, '应联动返回任务');
+    assert.equal(result.task.status, 'blocked');
+    assert.equal(result.task.blockedReason, '等对方开通权限');
+    // 关键：进展记录必须真的落库，而不是随状态报错一起回滚
+    const timeline = tracking.taskTimeline(task.id);
+    assert.equal(timeline.length, 1);
+    assert.equal(timeline[0]?.body, '等对方开通权限');
+  });
+});
+
+test('加卡点：解除后能退回"尚未开始"，不假装进行中', () => {
+  useDb((database) => {
+    const planning = createPlanningService(database);
+    const tracking = createTrackingService(database);
+
+    const task = planning.createTask({ title: '任务' });
+    tracking.addProgress({ target: { kind: 'task', id: task.id }, kind: 'blocker', body: '卡住原因' });
+    assert.equal(getTask(database, task.id)?.status, 'blocked');
+
+    const unblocked = tracking.unblockTask(task.id);
+    assert.equal(unblocked.status, 'doing', '解除阻塞回到 doing 是既有行为');
+
+    // 也可以显式退回"待办"，表示其实还没开始
+    const back = planning.setTaskStatus(task.id, 'todo');
+    assert.equal(back.status, 'todo');
+    assert.equal(getTask(database, task.id)?.blockedReason, null, '退回待办应清掉阻塞原因');
+  });
+});
+
 test('日志：汇总覆盖完成、新增、卡点、顺延与时间线', () => {
   useDb((database) => {
     const planning = createPlanningService(database);

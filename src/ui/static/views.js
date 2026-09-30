@@ -271,15 +271,42 @@ export async function renderInbox(root) {
 }
 
 // ============================================================
-// 全部未结束（F-09 / 需求 §6.6 可见性约束）
+// 全部：未结束 / 已完成（F-09 / F-09b）
 // ============================================================
 
 /**
- * 这一页的存在理由：捕获时不允许要求分类或排期（契约 2），
- * 因此"无截止日期、无项目"是合法状态。没有这一页，这类任务就永久沉底。
+ * 本页的两个模式共用一个页签（用户确认的方案）：
+ * 它们回答的是同一个问题的两半 —— "还有什么没做" / "做完了什么"。
+ * 模式与时间范围存在模块级变量里，切页签回来不会丢。
+ */
+let allMode = 'open';
+let completedRange = { preset: 'last7' };
+
+/**
+ * 未结束侧的存在理由：捕获时不允许要求分类或排期（契约 2），
+ * 因此"无截止日期、无项目"是合法状态。没有这一侧，这类任务就永久沉底。
  * 渲染上刻意分组且组内不重复，让"总共有多少事悬着"一眼可见。
  */
 export async function renderAll(root) {
+  const switcher = el('div', { class: 'toolbar' }, [
+    el('button', {
+      class: allMode === 'open' ? 'primary' : '',
+      onclick: () => { allMode = 'open'; void reload(); },
+    }, '全部未结束'),
+    el('button', {
+      class: allMode === 'done' ? 'primary' : '',
+      onclick: () => { allMode = 'done'; void reload(); },
+    }, '已完成'),
+  ]);
+
+  if (allMode === 'done') {
+    await renderCompleted(root, switcher);
+    return;
+  }
+  await renderOpen(root, switcher);
+}
+
+async function renderOpen(root, switcher) {
   const view = await api.openTasksView();
   const dayKey = view.dayKey;
 
@@ -293,9 +320,7 @@ export async function renderAll(root) {
   ];
 
   /** 复用今日页那一行的交互（记一笔 / 排入今日 / 状态推进 / 完成） */
-  function taskRow(task, extraTag) {
-    return buildTaskRow(task, dayKey, extraTag, reload);
-  }
+  const taskRow = (task) => buildTaskRow(task, dayKey, undefined, reload);
 
   const rendered = GROUPS
     .map(([key, label, className]) => ({ key, label, className, tasks: view[key] ?? [] }))
@@ -311,16 +336,13 @@ export async function renderAll(root) {
   ]);
 
   if (view.total === 0) {
-    mount(root, [
-      el('h2', {}, '全部未结束'),
-      header,
-      el('div', { class: 'empty' }, '没有未结束的任务。'),
-    ]);
+    mount(root, [el('h2', {}, '任务'), switcher, header, el('div', { class: 'empty' }, '没有未结束的任务。')]);
     return;
   }
 
   mount(root, [
     el('h2', {}, ['全部未结束 ', el('span', { class: 'count' }, `${view.total} 条`)]),
+    switcher,
     header,
     rendered.map((group) => el('div', {}, [
       el('h2', { class: `section-title ${group.className}` }, [
@@ -328,6 +350,94 @@ export async function renderAll(root) {
       ]),
       el('ul', { class: 'list' }, group.tasks.map((task) => taskRow(task))),
     ])),
+  ]);
+}
+
+/**
+ * 已完成侧（F-09b）。
+ *
+ * 存在的理由：需求 P4 把"复盘是编的"列为核心痛点、G3 承诺"写日报是导出而不是回忆"，
+ * 但此前只有单天汇总，写周报仍要逐天翻日志。这一侧就是那句承诺的落地：
+ * 选「最近 7 天」→ 一眼扫完 → 照着写。
+ */
+async function renderCompleted(root, switcher) {
+  const custom = { from: el('input', { type: 'date' }), to: el('input', { type: 'date' }) };
+  const rangeBar = el('div', { class: 'toolbar' }, [
+    el('span', {}, '时间范围'),
+    ...[
+      ['last7', '最近 7 天'],
+      ['all', '全部'],
+      ['custom', '自定义'],
+    ].map(([preset, label]) => el('button', {
+      class: completedRange.preset === preset ? 'primary' : '',
+      onclick: () => {
+        completedRange = preset === 'custom'
+          ? { preset, fromDayKey: custom.from.value || undefined, toDayKey: custom.to.value || undefined }
+          : { preset };
+        void reload();
+      },
+    }, label)),
+    completedRange.preset === 'custom' ? custom.from : null,
+    completedRange.preset === 'custom' ? el('span', {}, '至') : null,
+    completedRange.preset === 'custom' ? custom.to : null,
+    completedRange.preset === 'custom'
+      ? el('button', {
+        onclick: () => {
+          completedRange = { preset: 'custom', fromDayKey: custom.from.value, toDayKey: custom.to.value };
+          void reload();
+        },
+      }, '查询')
+      : null,
+  ]);
+
+  let view;
+  try {
+    view = await api.completedView(completedRange);
+  } catch (error) {
+    mount(root, [
+      el('h2', {}, '任务'),
+      switcher,
+      rangeBar,
+      el('div', { class: 'empty' }, `查询失败：${error.message}`),
+    ]);
+    return;
+  }
+
+  const totalLine = `${view.total.all} 条（任务 ${view.total.tasks} · 子任务 ${view.total.subtasks}）`;
+
+  /** 一行完成项：任务名 + 归属（项目 › 任务）；子任务额外显示父任务 */
+  function completedRow(entry) {
+    const meta = [];
+    if (entry.projectTitle !== null) meta.push(el('span', { class: 'tag' }, entry.projectTitle));
+    if (entry.kind === 'subtask' && entry.taskTitle !== null) {
+      meta.push(el('span', { class: 'item-raw' }, `属于：${entry.taskTitle}`));
+    }
+    return el('li', {}, [
+      el('span', {}, '☑'),
+      el('div', { class: 'item-body' }, [
+        el('div', { class: 'item-title' }, entry.title),
+        meta.length > 0 ? el('div', { class: 'item-meta' }, meta) : null,
+      ]),
+      el('div', { class: 'row-actions' }, [
+        el('span', { class: 'item-raw' }, entry.kind === 'subtask' ? '子任务' : '任务'),
+      ]),
+    ]);
+  }
+
+  const body = view.groups.length === 0
+    ? el('div', { class: 'empty' }, '这个时间段内没有完成的任务。换个范围看看？')
+    : view.groups.map((group) => el('div', {}, [
+      el('h2', { class: 'section-title' }, [
+        group.dayKey, el('span', { class: 'count' }, `${group.entries.length} 条`),
+      ]),
+      el('ul', { class: 'list' }, group.entries.map((entry) => completedRow(entry))),
+    ]));
+
+  mount(root, [
+    el('h2', {}, ['已完成 ', el('span', { class: 'count' }, totalLine)]),
+    switcher,
+    rangeBar,
+    body,
   ]);
 }
 
@@ -703,6 +813,16 @@ async function renderProjectTree(root, projectId) {
 // 日志（F-16 / F-17）
 // ============================================================
 
+/**
+ * 进展/卡点的归属标签：`项目 › 任务 › 子任务`，有哪层显示哪层（需求 F-20）。
+ * 三层都没有时返回 null —— 不显示空标签，界面保持干净。
+ */
+function contextTag(entry) {
+  const parts = [entry.projectTitle, entry.taskTitle, entry.subtaskTitle]
+    .filter((part) => part !== null && part !== undefined && part !== '');
+  return parts.length === 0 ? null : el('span', { class: 'tag' }, parts.join(' › '));
+}
+
 export async function renderLog(root) {
   const dayKey = todayDayKey();
   const dateInput = el('input', { type: 'date', value: dayKey });
@@ -743,8 +863,18 @@ export async function renderLog(root) {
       block('完成的任务', summary.completedTasks.map((task) => el('li', {}, `☑ ${task.title}`))),
       block('完成的子任务', summary.completedSubtasks.map((item) => el('li', {}, `☑ ${item.taskTitle} › ${item.subtask.title}`))),
       block('顺延（到期未完成）', summary.carriedOver.map((task) => el('li', {}, `${task.title}（截止 ${task.dueDate}）`))),
-      block('卡点', summary.blockers.map((entry) => el('li', {}, entry.body))),
-      block('进展时间线', summary.timeline.map((entry) => el('li', {}, `${timeOf(entry.occurredAt)} [${PROGRESS_LABEL[entry.kind]}] ${entry.body}`))),
+      // 卡点与进展都标注归属（需求 F-20）：progress_entries 只存外键没有名字，
+      // 内核在汇总时补齐 `项目 › 任务 › 子任务`，否则多个任务并行时分不清是哪件事。
+      block('卡点', summary.blockers.map((entry) => el('li', {}, [
+        contextTag(entry),
+        '[卡点] ',
+        entry.body,
+      ]))),
+      block('进展时间线', summary.timeline.map((entry) => el('li', {}, [
+        `${timeOf(entry.occurredAt)} `,
+        contextTag(entry),
+        `[${PROGRESS_LABEL[entry.kind]}] ${entry.body}`,
+      ]))),
       el('h2', {}, '我的正文'),
       textarea,
       saveRow,
