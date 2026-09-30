@@ -1,4 +1,4 @@
-# 工作秘书 WorkHelper — 技术设计文档
+﻿# 工作秘书 WorkHelper — 技术设计文档
 
 | 项目 | 内容 |
 | --- | --- |
@@ -511,7 +511,7 @@ interface PlanningService {
 }
 ```
 
-### 6.3 TrackingService — 推进与全部（F-08、F-09、F-10）
+### 6.3 TrackingService — 推进、全部与已完成（F-08、F-09、F-09b、F-10）
 
 ```ts
 interface TrackingService {
@@ -535,6 +535,42 @@ interface TrackingService {
     blocked: Task[];
     inboxCount: number;
   };
+
+  /**
+   * 全部未结束任务，六组互斥（F-09）。分组优先级见 §7.4。
+   */
+  openTasksView(dayKey?: string): OpenTasksView;
+
+  /**
+   * 已完成总览（F-09b）。时间范围三选一，与 F-09 同页签切换。
+   *
+   * 为什么按"完成时间戳区间"而不是 day_key：任务没有独立的归属日字段
+   * （只有 completed_at 这个真实时刻），因此这里用区间查询，
+   * 与 journal 里"任务按时间戳取"的口径一致。
+   */
+  completedView(range: {
+    /** 'last7' | 'all' | 'custom' */
+    preset: 'last7' | 'all' | 'custom';
+    fromDayKey?: string;   // custom 时必填
+    toDayKey?: string;
+  }): {
+    groups: { dayKey: string; entries: CompletedEntry[] }[];  // 按完成日倒序
+    total: { tasks: number; subtasks: number };
+  };
+}
+```
+
+**`CompletedEntry` 的形状**（F-09b 要求显示项目名与父任务名）：
+统一成一个扁平条目，避免界面为"任务"和"子任务"写两套渲染：
+
+```ts
+interface CompletedEntry {
+  kind: 'task' | 'subtask';
+  id: string;
+  title: string;
+  projectTitle: string | null;   // 所属项目
+  taskTitle: string | null;      // 子任务才有：父任务名
+  completedAt: string;
 }
 ```
 
@@ -544,27 +580,42 @@ interface TrackingService {
 - 所有子任务 `done` → 提示（不自动）完成任务；`cascadeSubtasks: true` 时才级联标记。
 - 任务转 `done` 时写 `completed_at`；从 `done` 改回其它状态时清空 `completed_at`。
 
-### 6.4 JournalService — 日志（F-17 ~ F-19）
+### 6.4 JournalService — 日志（F-19 ~ F-21）
 
 ```ts
+/** 带上下文的进展记录：光有正文看不出它属于哪件事（需求 R13） */
+interface ProgressWithContext extends ProgressEntry {
+  projectTitle: string | null;   // 有哪层显示哪层
+  taskTitle: string | null;
+  subtaskTitle: string | null;
+}
+
 interface JournalService {
   /** 自动汇总（不写库，纯查询投影） */
   summarize(dayKey: string): {
     dayKey: string;
     completedTasks: Task[];
-    completedSubtasks: Subtask[];
+    completedSubtasks: CompletedSubtask[];   // 带 taskTitle，供"任务 › 子任务"展示
     createdInbox: InboxItem[];
     createdTasks: Task[];
-    carriedOver: Task[];               // 该日未完成、且日界早于今天
-    openBlockers: ProgressEntry[];
-    timeline: ProgressEntry[];         // 当日全部进展记录，按时间
+    carriedOver: Task[];
+    blockers: ProgressWithContext[];         // 需求 F-20：必须带上下文
+    timeline: ProgressWithContext[];         // 同上
+    log: DailyLog | null;
+    counts: { completed: number; created: number; blockers: number; carriedOver: number };
   };
 
   get(dayKey: string): DailyLog | null;
   /** 保存手工正文（自动汇总部分不落库，避免数据重复与过期） */
   save(dayKey: string, body: string): DailyLog;
+  delete(dayKey: string): void;
 }
 ```
+
+**上下文标注的实现口径**（R13）：`progress_entries` 只存 `project_id` / `task_id` / `subtask_id`
+三个外键，**没有名字**。因此在汇总时按 id 批量回表取名，拼成 `项目 › 任务 › 子任务`。
+注意子任务型进展要**沿 `subtask → task → project` 补齐上层**，否则子任务上的卡点会没有任何归属线索。
+批量取名时必须避免 N+1：一次取全所需 id 集合，不要在循环里逐条查。
 
 **关键决策**：自动汇总是**运行时投影**，不写进 `daily_logs.body`。否则任务状态一变，历史日志就变成错的。日志只保存我手写的正文。
 
@@ -675,11 +726,12 @@ M0 用浏览器窗口模拟；M1 用 Tauri 的无边框置顶窗 + 全局快捷�
 | 页签 | 内容 | 验证的需求 |
 | --- | --- | --- |
 | **收件箱** | 待处理列表 + 多选 + `转任务`（可指定项目）/ `转项目` / `存为资料`（**必须先选目标**）/ `丢弃` / `删除`；顶部显示待处理数量 | F-04、需求 §6.5 |
-| **全部** | **所有未结束任务**，分六组：逾期 / 今天到期 / 进行中 / 卡住 / 已排期（未来）/ 没有排期。每组可 `记一笔`、`排入今日`、状态推进、`完成` | **F-09、需求 §6.6 可见性约束** |
+| **全部** | 页内切换 `[全部未结束] / [已完成]`。未结束侧：六组（逾期 / 今天到期 / 进行中 / 卡住 / 已排期 / 没有排期），每组可 `记一笔`、`排入今日`、状态推进、`完成`。已完成侧：按完成日倒序分组，带项目名与父任务名，顶部显示总数与 `最近 7 天 / 全部 / 自定义` 筛选 | **F-09、F-09b、需求 §6.6** |
 | **今日** | 逾期 / 今天到期 / 已排入今日 / 阻塞 四组；额外显示"还有 N 条不在这里"的指引 | F-08、F-10 |
 | **项目** | 项目 → 任务 → 子任务树；行内展开进展时间线（**拖拽排序尚未接界面**） | F-06、F-07 |
-| **日志** | 日期选择器 + 自动汇总区（只读）+ 手工正文编辑区 | F-20、F-21 |
+| **日志** | 日期选择器 + 自动汇总区（只读）+ 手工正文编辑区；**进展与卡点标注 `项目 › 任务 › 子任务`** | F-19 ~ F-21 |
 | **资料** | 按时间倒序列出资料；可筛"未挂靠"；可改/追加挂靠；多选入口批量打开。**默认显示，设置里可隐藏** | **F-11 ~ F-14** |
+| **回收站**（右上角入口，非页签） | 页内两个筛选：`已删除`（可恢复 / 30 天后自动清理）/ `已丢弃`（可放回待处理 / 不过期）；均可 `彻底删除`（**二次确认**） | **F-21b** |
 
 **两个计数徽标常驻顶部**：收件箱积压数、**未结束任务总数**（有逾期时转红）。
 后者是契约 V3 的落点——不这样做，积压会静默增长而我不知道。
@@ -714,6 +766,31 @@ M0 **刻意不做**：悬浮组件、托盘、全局快捷键、提醒、AI、�
 包含"分组不得重叠也不得遗漏"与"计数必须等于列出的条数"。
 
 ---
+
+### 7.5 「三种消失」在数据层的实现要点（F-21b）
+
+这三种状态**极易混淆**，实现时必须时刻分清（需求 §4 术语约定）：
+
+| | 丢弃 | 删除 | 彻底删除 |
+| --- | --- | --- | --- |
+| 写入 | `inbox_items.status = 'archived'` | `deleted_at = <now>` | `DELETE FROM …` |
+| 查询影响 | 退出 `listPendingInbox` | 退出所有活动查询（`deleted_at IS NULL`） | 永久消失 |
+| 回收站收录 | ✅ **但不靠 `deleted_at`** | ✅ `deleted_at IS NOT NULL` | —— |
+| 取回 | `status = 'pending'` | `deleted_at = NULL` | **不可能** |
+| 自动过期 | ❌ 不过期 | ✅ 30 天 | —— |
+
+**最容易踩的坑**：`trashRepo` 现有的每个查询都硬编码了 `deleted_at IS NOT NULL`。
+而丢弃的条目 `deleted_at` 是 **NULL**，因此**永远不会出现在回收站列表里**——
+这正是"丢弃是单向门"的成因（缺陷 R14）。
+实现「已丢弃」筛选时必须**单独一条查询路径**（按 `status='archived'`），
+不要把丢弃硬塞进现有的 `deleted_at` 条件里，否则两种语义会被搅在一起。
+
+**删除守卫**（D1）加在服务层：`deleteItem` 前检查 `status === 'pending'`，
+否则抛 `InvalidTransitionError`。这与 `assertTaskNotTerminal` 是同一类守卫——
+**终态/已处理的对象不允许被进一步"删除"**。
+
+**「彻底删除」的位置**：`purgeOne` 已存在（`softDeleteById` 的反面），
+但此前只有 CLI 暴露。新增界面入口时必须二次确认，且这是全系统唯一不可逆操作。
 
 ## 8. 关键流程时序
 
