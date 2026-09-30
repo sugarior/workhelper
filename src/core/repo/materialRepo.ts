@@ -247,6 +247,30 @@ export function listLinks(database: DatabaseSync, archiveId: string): MaterialLi
   return rows.map(toLink);
 }
 
+/**
+ * 批量取挂靠 —— 列表路径一律用它。
+ * `listAllLinks` 只该用于索引重建与自检：界面路径上"取全表再过滤"是白白的全表扫描。
+ */
+export function listLinksForArchives(database: DatabaseSync, archiveIds: readonly string[]): Map<string, MaterialLink[]> {
+  const grouped = new Map<string, MaterialLink[]>();
+  if (archiveIds.length === 0) return grouped;
+
+  const placeholders = archiveIds.map(() => '?').join(', ');
+  const rows = queryAll<LinkRow>(
+    database,
+    `SELECT * FROM ${LINKS} WHERE archive_id IN (${placeholders})
+     ORDER BY target_type ASC, created_at ASC`,
+    ...archiveIds,
+  );
+  for (const row of rows) {
+    const link = toLink(row);
+    const list = grouped.get(link.archiveId);
+    if (list === undefined) grouped.set(link.archiveId, [link]);
+    else list.push(link);
+  }
+  return grouped;
+}
+
 /** 某个任务/项目上挂着的全部资料 */
 export function listArchivesLinkedTo(database: DatabaseSync, targetType: MaterialLinkType, targetId: string): string[] {
   const rows = queryAll<{ archive_id: string }>(
