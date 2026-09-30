@@ -8,7 +8,7 @@
 // 内容此时已经安全落库，最坏情况只是暂时搜不到，可用 reindexAll() 重建。
 
 import type { DatabaseSync } from 'node:sqlite';
-import { indexEntity, removeEntity } from '../repo/index.ts';
+import { indexEntity, listEntries, removeEntity } from '../repo/index.ts';
 import type { ArchiveItem, DailyLog, InboxItem, ProgressEntry, Project, Subtask, Task } from '../domain/types.ts';
 
 export interface Indexer {
@@ -79,12 +79,19 @@ export function createIndexer(database: DatabaseSync): Indexer {
     },
 
     archive(item) {
+      // 资料的索引文本必须包含**入口**（路径与 URL）与**注释**，
+      // 否则需求 F-15 的"搜资料的路径"落空。
+      // 入口是子表，因此这里现查一次；单条写入的代价可以忽略。
+      const entries = listEntries(database, item.id);
+      const entryText = entries
+        .map((entry) => `${entry.target} ${entry.note ?? ''}`.trim())
+        .join(' ');
       safely(() => indexEntity(database, {
         entityType: 'archive',
         entityId: item.id,
         title: item.title ?? '',
-        body: item.body ?? '',
-      }), '资料条目');
+        body: entryText,
+      }), '资料');
     },
 
     log(entry) {

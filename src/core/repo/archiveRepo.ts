@@ -1,5 +1,13 @@
-// 资料归档仓储：会议纪要、链接、截图、文件等非任务信息。
-// 可关联到项目/任务，也可游离存在（会议纪要往往先归档再决定归属）。
+// 资料仓储：资料本身（标题 + 若干入口 + 若干挂靠）。
+//
+// 注意分工：本文件的 archive_items 只承载资料的**身份**（标题、kind、日键）。
+// **入口在 materialRepo 的 archive_entries**，**挂靠在 archive_links**。
+// 迁移 004 之后 archive_items 上不再有 task_id / project_id —— 单值关联已彻底废弃，
+// 因为一条资料可以挂靠多个任务/项目（需求 §4.2 D2）。
+//
+// body / url 两列仍留在表上（迁移 004 特意没删：003 只把"像指针"的值转成入口，
+// 散文类正文还在 body 里，删掉就丢内容）。**新代码不再读写它们**，
+// 它们只作为历史数据的落脚点，等资料页的清理流程处理。
 
 import type { DatabaseSync } from 'node:sqlite';
 import { insert, queryAll, queryOne, updateById } from '../db/connection.ts';
@@ -16,8 +24,6 @@ interface ArchiveRow {
   title: string | null;
   body: string | null;
   url: string | null;
-  project_id: string | null;
-  task_id: string | null;
   day_key: string | null;
   created_at: string;
   updated_at: string;
@@ -34,8 +40,6 @@ function toArchive(row: ArchiveRow): ArchiveItem {
     title: row.title,
     body: row.body,
     url: row.url,
-    projectId: row.project_id,
-    taskId: row.task_id,
     dayKey: row.day_key,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -46,21 +50,12 @@ function toArchive(row: ArchiveRow): ArchiveItem {
 export interface ArchiveCreate {
   kind?: ArchiveKind;
   title?: string | null;
-  body?: string | null;
-  url?: string | null;
-  projectId?: string | null;
-  taskId?: string | null;
-  /** 归属日键，由服务层按日界算出 */
   dayKey?: string | null;
 }
 
 export interface ArchivePatch {
   kind?: ArchiveKind;
   title?: string | null;
-  body?: string | null;
-  url?: string | null;
-  projectId?: string | null;
-  taskId?: string | null;
   dayKey?: string | null;
 }
 
@@ -71,15 +66,11 @@ export function createArchive(database: DatabaseSync, input: ArchiveCreate): Arc
     id,
     kind: input.kind ?? 'note',
     title: input.title ?? null,
-    body: input.body ?? null,
-    url: input.url ?? null,
-    project_id: input.projectId ?? null,
-    task_id: input.taskId ?? null,
     day_key: input.dayKey ?? null,
     created_at: now,
     updated_at: now,
   });
-  return requireById(getArchive(database, id), '资料条目', id);
+  return requireById(getArchive(database, id), '资料', id);
 }
 
 export function getArchive(database: DatabaseSync, id: string): ArchiveItem | undefined {
@@ -88,8 +79,6 @@ export function getArchive(database: DatabaseSync, id: string): ArchiveItem | un
 }
 
 export interface ArchiveFilter {
-  taskId?: string;
-  projectId?: string;
   dayKey?: string;
   limit?: number;
 }
@@ -97,14 +86,6 @@ export interface ArchiveFilter {
 export function listArchives(database: DatabaseSync, filter: ArchiveFilter = {}): ArchiveItem[] {
   const conditions = ['deleted_at IS NULL'];
   const params: (string | number | null)[] = [];
-  if (filter.taskId !== undefined) {
-    conditions.push('task_id = ?');
-    params.push(filter.taskId);
-  }
-  if (filter.projectId !== undefined) {
-    conditions.push('project_id = ?');
-    params.push(filter.projectId);
-  }
   if (filter.dayKey !== undefined) {
     conditions.push('day_key = ?');
     params.push(filter.dayKey);
@@ -113,12 +94,25 @@ export function listArchives(database: DatabaseSync, filter: ArchiveFilter = {})
     database,
     `SELECT * FROM ${TABLE} WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT ?`,
     ...params,
-    filter.limit ?? 100,
+    filter.limit ?? 200,
   );
   return rows.map(toArchive);
 }
 
-/** 在时间区间内创建的资料条目（每日日志汇总用） */
+/** 批量按 id 读取（资料页按挂靠筛选后回表用），保持传入顺序 */
+export function listArchivesByIds(database: DatabaseSync, ids: readonly string[]): ArchiveItem[] {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(', ');
+  const rows = queryAll<ArchiveRow>(
+    database,
+    `SELECT * FROM ${TABLE} WHERE id IN (${placeholders}) AND deleted_at IS NULL`,
+    ...ids,
+  );
+  const byId = new Map(rows.map((row) => [row.id, toArchive(row)]));
+  return ids.map((id) => byId.get(id)).filter((item): item is ArchiveItem => item !== undefined);
+}
+
+/** 在时间区间内创建的资料（每日日志汇总用） */
 export function listArchivesCreatedBetween(database: DatabaseSync, startIso: string, endIso: string): ArchiveItem[] {
   const rows = queryAll<ArchiveRow>(
     database,
@@ -131,19 +125,15 @@ export function listArchivesCreatedBetween(database: DatabaseSync, startIso: str
 }
 
 export function updateArchive(database: DatabaseSync, id: string, patch: ArchivePatch): ArchiveItem {
-  requireById(getArchive(database, id), '资料条目', id);
+  requireById(getArchive(database, id), '资料', id);
   updateById(database, TABLE, id, {
     kind: patch.kind,
     title: patch.title,
-    body: patch.body,
-    url: patch.url,
-    project_id: patch.projectId,
-    task_id: patch.taskId,
     day_key: patch.dayKey,
   });
-  return requireById(getArchive(database, id), '资料条目', id);
+  return requireById(getArchive(database, id), '资料', id);
 }
 
 export function deleteArchive(database: DatabaseSync, id: string): void {
-  softDeleteOrThrow(database, TABLE, '资料条目', id);
+  softDeleteOrThrow(database, TABLE, '资料', id);
 }

@@ -7,7 +7,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import {
   countIndexed, getArchive, getDailyLog, getInboxItem, getProject, getSubtask, getTask,
-  indexEntity, listArchives, listDailyLogs, listProjects, listSubtasks, listTasks,
+  indexEntity, listArchives, listDailyLogs, listEntries, listProjects, listSubtasks, listTasks,
   removeEntity, rebuildIndex, search as searchRepo,
 } from '../repo/index.ts';
 import type { IndexInput, SearchHit } from '../repo/searchRepo.ts';
@@ -103,14 +103,17 @@ export function collectAllIndexInputs(database: DatabaseSync): IndexInput[] {
     inputs.push({ entityType: 'inbox', entityId: row.id, title: '', body: `${row.body} ${row.raw_input ?? ''}`.trim() });
   }
   const archiveRows = database
-    .prepare('SELECT id, title, body FROM archive_items WHERE deleted_at IS NULL')
-    .all() as { id: string; title: string | null; body: string | null }[];
+    .prepare('SELECT id, title FROM archive_items WHERE deleted_at IS NULL')
+    .all() as { id: string; title: string | null }[];
+  // 资料的检索文本来自**入口**（路径 / URL + 各自注释），不再是 archive_items.body。
+  // 需求 F-15 要求能搜到资料的路径；见设计 §4.5。
   for (const row of archiveRows) {
+    const entries = listEntries(database, row.id);
     inputs.push({
       entityType: 'archive',
       entityId: row.id,
       title: row.title ?? '',
-      body: row.body ?? '',
+      body: entries.map((entry) => `${entry.target} ${entry.note ?? ''}`.trim()).join(' '),
     });
   }
   for (const log of listDailyLogs(database, { limit: 1000 })) {

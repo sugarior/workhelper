@@ -31,6 +31,42 @@ export type InboxKindHint = (typeof INBOX_KIND_HINTS)[number];
 export const ARCHIVE_KINDS = ['note', 'meeting', 'link', 'file'] as const;
 export type ArchiveKind = (typeof ARCHIVE_KINDS)[number];
 
+/**
+ * 资料入口的类型。刻意只有三种（需求 §4.2 D1）：
+ * 网址不单列"网络资料" —— 飞书文档、Overleaf 这类网址**本身就是工作区**，
+ * 按"是否本地"分类没有意义，有用的是"怎么打开"。
+ */
+export const MATERIAL_ENTRY_KINDS = ['dir', 'file', 'url'] as const;
+export type MaterialEntryKind = (typeof MATERIAL_ENTRY_KINDS)[number];
+
+/** 资料可挂靠的对象类型（需求 §4.1 M1：必须至少挂一个） */
+export const MATERIAL_LINK_TYPES = ['task', 'project'] as const;
+export type MaterialLinkType = (typeof MATERIAL_LINK_TYPES)[number];
+
+/** 资料里的一个可打开入口 */
+export interface MaterialEntry {
+  id: string;
+  archiveId: string;
+  kind: MaterialEntryKind;
+  /** 绝对路径或 URL，原样保存（不规范化、不校验可达性） */
+  target: string;
+  /** 该入口自己的注释（需求 §4.2 D4） */
+  note: string | null;
+  /** 排序值，用于"按常用程度排序" */
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+}
+
+/** 资料与任务/项目的挂靠关系 */
+export interface MaterialLink {
+  archiveId: string;
+  targetType: MaterialLinkType;
+  targetId: string;
+  createdAt: string;
+}
+
 /** 进展记录挂载目标的层级 */
 export const TARGET_KINDS = ['project', 'task', 'subtask'] as const;
 export type TargetKind = (typeof TARGET_KINDS)[number];
@@ -138,10 +174,13 @@ export interface ArchiveItem {
   id: string;
   kind: ArchiveKind;
   title: string | null;
+  /**
+   * @deprecated 历史字段。迁移 004 起，资料的内容由**入口**（MaterialEntry）承载。
+   * 仅保留用于承载迁移前留下的散文正文，新代码不读写。
+   */
   body: string | null;
+  /** @deprecated 同上：历史 URL 已在迁移 003 转为 url 入口 */
   url: string | null;
-  projectId: string | null;
-  taskId: string | null;
   dayKey: string | null;
   createdAt: string;
   updatedAt: string;

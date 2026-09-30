@@ -104,29 +104,19 @@ test('收件箱：批量清空后计数归零', () => {
   });
 });
 
-test('资料：创建并关联到项目/任务，也可游离', () => {
+test('资料：创建后无入口无挂靠（挂靠由服务层强制，见 materialRepo 测试）', () => {
   useDb((database) => {
-    const project = createProject(database, { title: '项目' });
-    const task = createTask(database, { title: '任务' });
-
     const meeting = createArchive(database, {
       kind: 'meeting',
       title: '与法务确认合同条款',
-      body: '结论：需要补充附件三',
-      taskId: task.id,
       dayKey: '2026-09-30',
     });
     assert.equal(meeting.kind, 'meeting');
-    assert.equal(meeting.taskId, task.id);
-
-    const link = createArchive(database, { kind: 'link', title: '参考资料', url: 'https://example.com/x' });
-    assert.equal(link.url, 'https://example.com/x');
-    assert.equal(link.taskId, null);
-
-    assert.equal(listArchives(database, { taskId: task.id }).length, 1);
+    assert.equal(meeting.title, '与法务确认合同条款');
+    // 迁移 004 起资料上不再有 taskId / projectId —— 单值关联已废弃
+    assert.equal('taskId' in meeting, false, '资料不应再有单值任务关联字段');
+    assert.equal('projectId' in meeting, false, '资料不应再有单值项目关联字段');
     assert.equal(listArchives(database, { dayKey: '2026-09-30' }).length, 1);
-    assert.equal(listArchives(database).length, 2);
-    assert.equal(updateArchive(database, link.id, { projectId: project.id }).projectId, project.id);
   });
 });
 
@@ -141,7 +131,7 @@ test('资料：按时间区间查询用于每日汇总', () => {
 
 test('资料：删除后不可见', () => {
   useDb((database) => {
-    const item = createArchive(database, { kind: 'note', body: '随手记' });
+    const item = createArchive(database, { kind: 'note', title: '随手记' });
     deleteArchive(database, item.id);
     assert.equal(getArchive(database, item.id), undefined);
     assert.equal(listArchives(database).length, 0);
