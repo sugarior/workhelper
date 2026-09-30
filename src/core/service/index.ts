@@ -51,8 +51,9 @@ export function createServices(database: DatabaseSync, options: CreateServicesOp
 }
 
 export type { CaptureService, ClassifyTarget, ClassifyResult } from './captureService.ts';
+export { CLASSIFY_RESULT_LABELS } from './captureService.ts';
 export type { PlanningService, ProjectTree, TaskNode, ReorderKind } from './planningService.ts';
-export type { TrackingService, TodayView } from './trackingService.ts';
+export type { TrackingService, TodayView, OpenTasksView } from './trackingService.ts';
 export type { JournalService, JournalSummary, CompletedSubtask } from './journalService.ts';
 export type { SearchService, ResolvedHit } from './searchService.ts';
 export type { SystemService, BackupFile, IntegrityReport } from './systemService.ts';

@@ -6,8 +6,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { withTx } from '../db/index.ts';
 import {
-  archiveInboxItem, countPendingInbox, createArchive, createInboxItem, createTask,
-  deleteArchive, deleteTask, getInboxItem, indexEntity, listPendingInbox, markConverted,
+  archiveInboxItem, countPendingInbox, createArchive, createInboxItem, createProject, createTask,
+  deleteArchive, deleteProject, deleteTask, getInboxItem, listPendingInbox, markConverted,
   getDayBoundaryHour, getSetting, setSetting,
 } from '../repo/index.ts';
 import { parseDate, stripParsedDate } from '../day/parseDate.ts';
@@ -21,8 +21,18 @@ import type { ParsedDate } from '../day/parseDate.ts';
 /** 分类目标：把一条收件箱碎片变成什么 */
 export type ClassifyTarget =
   | { kind: 'task'; projectId?: string | null; dueDate?: string | null; priority?: Task['priority'] }
+  /**
+   * 碎片本身就是"一件事"（需求 F-04 的「转项目」）。
+   * 只新建项目并把它当作后续任务与子任务的容器 —— **不在这里拆分**，
+   * 拆解留到项目页去做。这就是"当场只需判断它是项目"的价值：
+   * 若先转成任务，之后没有任何路径能把它升级为项目。
+   */
+  | { kind: 'project'; goal?: string | null }
   | { kind: 'archive'; archiveKind?: ArchiveKind }
   | { kind: 'discard' };
+
+/** 分类会新建的实体类型（discard 不新建，故不在内） */
+export type CreatedKind = 'task' | 'project' | 'archive';
 
 export interface ClassifyResult {
   inboxId: string;
@@ -31,24 +41,41 @@ export interface ClassifyResult {
   createdId: string;
 }
 
+/**
+ * 分类结果的用户可见名称。
+ *
+ * 刻意做成查表而不是三元表达式：原先 CLI 里写的是
+ * `kind === 'task' ? '任务' : kind === 'archive' ? '资料' : '已丢弃'`，
+ * 于是**新增 project 之后它落进兜底分支被显示成"已丢弃"**——
+ * 功能是对的，反馈是错的。查表 + 穷尽键能避免这类静默错误。
+ */
+export const CLASSIFY_RESULT_LABELS: Readonly<Record<'task' | 'project' | 'archive' | 'inbox', string>> = {
+  task: '任务',
+  project: '项目',
+  archive: '资料',
+  inbox: '已丢弃',
+};
+
 /** 撤销日志：一次分类操作的全部影响，存在 settings 里，避免为此加表 */
 interface UndoRecord {
   at: string;
   /** 本次涉及的全部收件箱条目，撤销时放回待处理 */
   inboxIds: string[];
   /** 本次新建的实体，撤销时软删除 */
-  created: { kind: 'task' | 'archive'; id: string }[];
+  created: { kind: CreatedKind; id: string }[];
 }
 
 const UNDO_SETTING_KEY = 'capture.undoLog';
 const MAX_UNDO_BATCH = 200;
 
 /**
- * 从分类结果里挑出"本次新建的实体"，供撤销时反向清理 */
-function toCreatedRefs(results: readonly ClassifyResult[]): { kind: 'task' | 'archive'; id: string }[] {
+ * 从分类结果里挑出"本次新建的实体"，供撤销时反向清理。
+ * 注意 discard 不在内：它不新建任何实体，只需把收件箱条目放回待处理。
+ */
+function toCreatedRefs(results: readonly ClassifyResult[]): { kind: CreatedKind; id: string }[] {
   return results
-    .filter((result): result is ClassifyResult & { createdKind: 'task' | 'archive' } =>
-      result.createdKind === 'task' || result.createdKind === 'archive',
+    .filter((result): result is ClassifyResult & { createdKind: CreatedKind } =>
+      result.createdKind === 'task' || result.createdKind === 'project' || result.createdKind === 'archive',
     )
     .map((result) => ({ kind: result.createdKind, id: result.createdId }));
 }
@@ -118,6 +145,16 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
       // 这里曾经漏接，导致分类产生的资料永远搜不到。
       indexer.archive(archive);
       return { inboxId: id, createdKind: 'archive', createdId: archive.id };
+    }
+
+    if (target.kind === 'project') {
+      const project = createProject(database, {
+        title: item.body,
+        goal: target.goal ?? null,
+      });
+      markConverted(database, id, `project:${project.id}`);
+      indexer.project(project);
+      return { inboxId: id, createdKind: 'project', createdId: project.id };
     }
 
     const task = createTask(database, {
@@ -207,7 +244,9 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
       return withTx(database, () => {
         for (const entry of record.created) {
           if (entry.kind === 'task') deleteTask(database, entry.id);
+          else if (entry.kind === 'project') deleteProject(database, entry.id);
           else deleteArchive(database, entry.id);
+          indexer.remove(entry.kind, entry.id);
         }
 
         for (const inboxId of record.inboxIds) {

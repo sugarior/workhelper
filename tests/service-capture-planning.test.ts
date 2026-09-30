@@ -7,7 +7,9 @@ import assert from 'node:assert/strict';
 import { useDb } from './helpers/db.ts';
 import { createCaptureService, canUndoClassification } from '../src/core/service/captureService.ts';
 import { createPlanningService } from '../src/core/service/planningService.ts';
+import { createSearchService } from '../src/core/service/searchService.ts';
 import { createTask, getTask, listTasks } from '../src/core/repo/taskRepo.ts';
+import { listProjects } from '../src/core/repo/projectRepo.ts';
 import { listSubtasks } from '../src/core/repo/subtaskRepo.ts';
 import { listArchives } from '../src/core/repo/archiveRepo.ts';
 import { getInboxItem } from '../src/core/repo/inboxRepo.ts';
@@ -91,6 +93,102 @@ test('分类为资料 / 丢弃', () => {
     assert.equal(discardResult.createdKind, 'inbox');
     assert.equal(getInboxItem(database, asDiscard.id)?.status, 'archived');
     assert.equal(capture.countPending(), 0);
+  });
+});
+
+test('分类为项目：碎片直接成为新项目，不产生任务', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    // 这一条本质就是"一件事"，而不是一件可独立交付的工作单元
+    const item = capture.quickCapture({ text: 'Q3 数据平台迁移' }).item;
+
+    const result = capture.classify(item.id, { kind: 'project', goal: '把订单库迁到新集群' });
+    assert.equal(result.createdKind, 'project');
+
+    const projects = listProjects(database);
+    assert.equal(projects.length, 1);
+    assert.equal(projects[0]?.title, 'Q3 数据平台迁移');
+    assert.equal(projects[0]?.goal, '把订单库迁到新集群');
+
+    // 关键：项目是空容器，后续在项目页里逐步加任务与子任务
+    assert.equal(listTasks(database).length, 0, '转项目不应顺带造出任务');
+    assert.equal(listSubtasks(database, 'whatever').length, 0);
+    assert.equal(getInboxItem(database, item.id)?.status, 'converted');
+    assert.equal(getInboxItem(database, item.id)?.convertedTo, `project:${projects[0]?.id}`);
+    assert.equal(capture.countPending(), 0);
+  });
+});
+
+test('分类为项目：不带目标描述也能转', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    const item = capture.quickCapture({ text: '装修书房' }).item;
+    capture.classify(item.id, { kind: 'project' });
+
+    const projects = listProjects(database);
+    assert.equal(projects.length, 1);
+    assert.equal(projects[0]?.goal, null);
+  });
+});
+
+test('批量转项目：一次把多条碎片变成多个项目', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    const ids = ['装修书房', '换车', '年度体检'].map((body) => capture.quickCapture({ text: body }).item.id);
+
+    const results = capture.classifyMany(ids, { kind: 'project' });
+    assert.equal(results.length, 3);
+    assert.deepEqual(results.map((r) => r.createdKind), ['project', 'project', 'project']);
+    assert.deepEqual(listProjects(database).map((p) => p.title).sort(), ['换车', '年度体检', '装修书房'].sort());
+    assert.equal(capture.countPending(), 0);
+  });
+});
+
+test('撤销：转项目后可整体撤销，项目消失且条目回到待处理', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    const item = capture.quickCapture({ text: '需要立项的事' }).item;
+    capture.classify(item.id, { kind: 'project' });
+    assert.equal(listProjects(database).length, 1);
+    assert.equal(canUndoClassification(database), true);
+
+    assert.equal(capture.undoLastClassification(), true);
+    assert.equal(listProjects(database).length, 0, '撤销应把新建项目从活动视图移除');
+    assert.equal(getInboxItem(database, item.id)?.status, 'pending', '条目应回到待处理');
+    assert.equal(getInboxItem(database, item.id)?.convertedTo, null, 'convertedTo 应被清掉');
+    assert.equal(canUndoClassification(database), false, '不能重复撤销');
+  });
+});
+
+test('撤销：混合批量（项目 + 任务 + 资料）能一次全部回退', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    const asProject = capture.quickCapture({ text: '该立项的' }).item.id;
+    const asTask = capture.quickCapture({ text: '该做成任务的' }).item.id;
+    const asArchive = capture.quickCapture({ text: '该留存的' }).item.id;
+
+    capture.classify(asProject, { kind: 'project' });
+    capture.classify(asTask, { kind: 'task' });
+    capture.classify(asArchive, { kind: 'archive' });
+    // 单条分类各自写撤销点，最后一次撤销只回退最后一条
+    assert.equal(capture.undoLastClassification(), true);
+    assert.equal(listArchives(database).length, 0);
+    assert.equal(listProjects(database).length, 1, '项目不受最后一次撤销影响');
+    assert.equal(listTasks(database).length, 1);
+  });
+});
+
+test('分类为项目：新项目立刻可搜（与任务、资料一致）', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    const search = createSearchService(database);
+    const item = capture.quickCapture({ text: '数据平台迁移' }).item;
+    capture.classify(item.id, { kind: 'project' });
+
+    const hits = search.search('数据平台');
+    const projectHit = hits.find((hit) => hit.entityType === 'project');
+    assert.ok(projectHit !== undefined, `新项目必须立刻能搜到，实际命中：${JSON.stringify(hits.map((h) => h.entityType))}`);
+    assert.equal(projectHit.displayTitle, '数据平台迁移');
   });
 });
 

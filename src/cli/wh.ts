@@ -11,6 +11,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { openDatabase, closeDatabase, DEFAULT_DB_FILENAME } from '../core/db/connection.ts';
 import { migrate, currentVersion, listMigrations } from '../core/db/migrations.ts';
 import { createServices } from '../core/service/index.ts';
+import { CLASSIFY_RESULT_LABELS } from '../core/service/index.ts';
 import { isDomainError } from '../core/domain/errors.ts';
 import { defaultDataDir, resolveFromRoot } from '../core/paths.ts';
 import { resolveRef } from './refs.ts';
@@ -29,6 +30,8 @@ const HELP = `WorkHelper ${VERSION} —— 常驻桌面的个人工作秘书
   inbox                     查看待处理的收件箱
   task <id...> [选项]       把收件箱条目转成任务
                             --project <id> --due <日期> --priority high|normal|low
+  newproj <id...> [选项]    把收件箱条目转成新项目（本身是一件事，不是一件事里的一步）
+                            --goal <目标描述>；拆解留到 proj show 之后做
   archive <id...> [选项]    把收件箱条目存为资料（--kind note|meeting|link|file）
   discard <id...>           丢弃收件箱条目
   undo                      撤销上一次分类
@@ -201,7 +204,7 @@ function commandInbox(context: CliContext): void {
 
 function buildClassifyTarget(
   context: CliContext,
-  command: 'task' | 'archive' | 'discard',
+  command: 'task' | 'newproj' | 'archive' | 'discard',
   values: Record<string, unknown>,
 ): ClassifyTarget {
   if (command === 'discard') return { kind: 'discard' };
@@ -209,6 +212,11 @@ function buildClassifyTarget(
   if (command === 'archive') {
     const archiveKind = oneOf(optionalString(values, 'kind'), ARCHIVE_KINDS, 'kind');
     return archiveKind === undefined ? { kind: 'archive' } : { kind: 'archive', archiveKind };
+  }
+
+  if (command === 'newproj') {
+    // 碎片本身是一件事：新建项目，不在此拆分（拆解在项目页做）
+    return { kind: 'project', goal: optionalString(values, 'goal') ?? null };
   }
 
   const projectFlag = optionalString(values, 'project');
@@ -226,7 +234,7 @@ function buildClassifyTarget(
 function commandClassify(
   context: CliContext,
   ids: string[],
-  command: 'task' | 'archive' | 'discard',
+  command: 'task' | 'newproj' | 'archive' | 'discard',
   values: Record<string, unknown>,
 ): void {
   if (ids.length === 0) throw new Error(`请在命令后给出至少一个收件箱条目 id`);
@@ -243,8 +251,10 @@ function commandClassify(
     return;
   }
   for (const result of results) {
-    const label = result.createdKind === 'task' ? '任务' : result.createdKind === 'archive' ? '资料' : '已丢弃';
-    console.log(`${label} ${shortId(result.createdId)}`);
+    // 查表而不是三元表达式：新增 project 时三元表达式会静默落入兜底分支，
+    // 把"已转成项目"显示成"已丢弃"（本项目真实发生过）。
+    const kind = result.createdKind as keyof typeof CLASSIFY_RESULT_LABELS;
+    console.log(`${CLASSIFY_RESULT_LABELS[kind] ?? kind} ${shortId(result.createdId)}`);
   }
   console.log(`剩余待处理 ${context.services.capture.countPending()} 条（可用 undo 撤销）`);
 }
@@ -638,6 +648,7 @@ async function main(): Promise<void> {
         commandInbox(context);
         return;
       case 'task':
+      case 'newproj':
       case 'archive':
       case 'discard':
         commandClassify(context, rest, command, values);
