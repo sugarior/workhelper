@@ -1292,28 +1292,27 @@ export function focusNoteInput() {
  *
  * 页面内保留当前筛选，切走再回来不会跳回默认项。
  */
+const trashTabs = ['ignored', 'deleted'];
 let trashTab = 'ignored';
 
 export async function renderTrash(root) {
   const overview = await api.trashOverview();
   const { counts, retentionDays } = overview;
-  const hasLegacyDeleted = counts.deleted > 0;
 
-  // 没有历史数据时不显示「已删除」，且默认筛选必须是「已忽略」
-  if (!hasLegacyDeleted) trashTab = 'ignored';
-  else if (trashTab !== 'ignored' && trashTab !== 'deleted') trashTab = 'ignored';
+  if (!trashTabs.includes(trashTab)) trashTab = 'ignored';
 
+  // 两个分类**始终都在**，即使某一侧为空。
+  // 早期的做法是"没有历史数据就不显示已删除"，那是基于"删除只属于旧版本"的假设 ——
+  // 资料可以删除之后这个假设就不成立了，隐藏它会让用户以为删掉的资料丢了。
   const switcher = el('div', { class: 'toolbar' }, [
     el('button', {
       class: trashTab === 'ignored' ? 'primary' : '',
       onclick: () => { trashTab = 'ignored'; void reload(); },
     }, `已忽略（${counts.ignored}）`),
-    hasLegacyDeleted
-      ? el('button', {
-        class: trashTab === 'deleted' ? 'primary' : '',
-        onclick: () => { trashTab = 'deleted'; void reload(); },
-      }, `历史已删除（${counts.deleted}）`)
-      : null,
+    el('button', {
+      class: trashTab === 'deleted' ? 'primary' : '',
+      onclick: () => { trashTab = 'deleted'; void reload(); },
+    }, `已删除（${counts.deleted}）`),
   ]);
 
   const rows = trashTab === 'deleted'
@@ -1321,8 +1320,8 @@ export async function renderTrash(root) {
     : renderIgnoredRows(overview.ignored, reload);
 
   const explain = trashTab === 'deleted'
-    ? `这些是旧版本"删除"动作留下的记录，保留 ${retentionDays} 天后自动清理。恢复即回到原样。`
-    : '「忽略」表示"我不要这条"。它**不会自动过期**，也仍然能被搜索到；放回待处理即可继续整理。';
+    ? `这里放的是**删除的资料**（以及旧版本删掉的收件箱条目），保留 ${retentionDays} 天后自动清理。恢复即回到原样。`
+    : '「忽略」表示"我不要这条"（收件箱里的条目）。它**不会自动过期**，也仍然能被搜索到；放回待处理即可继续整理。';
 
   mount(root, [
     el('h2', {}, '回收站'),
@@ -1334,15 +1333,16 @@ export async function renderTrash(root) {
 
 function renderDeletedRows(entries, retentionDays, onChanged) {
   if (entries.length === 0) {
-    return el('div', { class: 'empty' }, '没有已删除的内容（误删的东西会出现在这里）。');
+    return el('div', { class: 'empty' }, '没有已删除的内容。删掉的资料会出现在这里（保留 30 天，可恢复）。');
   }
   return el('ul', { class: 'list' }, entries.map((entry) => el('li', {}, [
     el('div', { class: 'item-body' }, [
       el('div', { class: 'item-title' }, entry.title === '' ? '（无标题）' : entry.title),
       el('div', { class: 'item-meta' }, [
-        el('span', { class: 'tag' }, entry.label),
+        // 这一侧放的是两类东西（资料、旧版本删掉的收件箱条目），
+        // 因此每行都要标明它是什么 —— 否则看不懂自己在看什么
+        el('span', { class: 'tag' }, entry.entityType === 'archive' ? '资料' : '收件箱条目'),
         el('span', { class: 'item-raw' }, `还剩 ${entry.daysLeft} 天`),
-        el('span', {}, shortId(entry.entityId)),
       ]),
     ]),
     el('div', { class: 'row-actions' }, [
@@ -1683,13 +1683,24 @@ function materialRow(material, options, onChanged) {
         await onChanged();
       }),
     }, '挂靠'),
-    options.compact === true ? null : el('button', {
+    // 删除**在所有位置都提供**（含任务/项目页的折叠行）。
+    // 一开始我用 `options.compact` 把它藏了起来，理由是"折叠行里放删除太挤"——
+    // 但那造成同一个对象在不同页面能做的事不一样，用户根本找不到入口。
+    //
+    // 资料可以删除（需求 §4.5）：它是**指针索引**，价值只在"能打开"，
+    // 一条指向已搬迁目录的资料留着只会误导。这与任务/项目不同 ——
+    // 那两者带历史价值，终止方式是「中止」/「归档」。
+    el('button', {
       class: 'danger',
-      title: '删除这条资料，入口一并消失',
+      title: '删除这条资料（进回收站，30 天内可恢复）',
       onclick: () => void withBusy(null, async () => {
-        if (!window.confirm(`删除资料「${material.title ?? ''}」？\n\n· 它的入口会一并消失（软删除，可恢复）`)) return;
+        if (!window.confirm(
+          `删除资料「${material.title ?? ''}」？\n\n` +
+          '· 它的入口会一并移除\n' +
+          '· 进回收站，30 天内可以在那里恢复',
+        )) return;
         await api.removeMaterial(material.id);
-        flash('已删除');
+        flash('已删除，可在回收站恢复');
         await onChanged();
       }),
     }, '删除'),
