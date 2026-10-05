@@ -16,6 +16,7 @@ import { createCaptureService } from '../src/core/service/captureService.ts';
 import { createPlanningService } from '../src/core/service/planningService.ts';
 import { createTrackingService } from '../src/core/service/trackingService.ts';
 import { createSearchService } from '../src/core/service/searchService.ts';
+import { createSystemService } from '../src/core/service/systemService.ts';
 import { listEntries, countEntries, countValidLinks, listOrphanArchives } from '../src/core/repo/materialRepo.ts';
 import { ValidationError, NotFoundError, InvalidTransitionError } from '../src/core/domain/errors.ts';
 
@@ -309,6 +310,27 @@ test('撤销转出：资料被撤销后，任务上的资料列表里不能还�
     capture.undoLastClassification();
     // 只查挂靠表会返回已删除资料的行，于是任务详情里会出现一条点不开的资料
     assert.deepEqual(materials.listForTarget('task', task.id), []);
+  });
+});
+
+test('删除与恢复必须成对：从回收站恢复资料时，入口要一起回来', () => {
+  useDb((database) => {
+    const materials = createMaterialService(database);
+    const planning = createPlanningService(database);
+    const system = createSystemService(database, 'D:\\temp\\wh-restore-test');
+    const task = planning.createTask({ title: '任务' });
+    const material = materials.create({
+      entries: [{ kind: 'dir', target: DIR }, { kind: 'url', target: URL }],
+      targets: [{ type: 'task', id: task.id }],
+    });
+
+    materials.remove(material.id);
+    assert.deepEqual(listEntries(database, material.id), [], '删除时入口一并软删除');
+
+    system.restoreTrash('archive', material.id);
+    // 只做删除侧的级联而漏掉恢复侧，会得到一条"回来了但没有入口"的资料 ——
+    // 数据看起来正常、实际已经残废，比直接删掉更难发现（实际就是这样踩到的）
+    assert.equal(materials.get(material.id).entries.length, 2, '恢复后入口必须回来');
   });
 });
 

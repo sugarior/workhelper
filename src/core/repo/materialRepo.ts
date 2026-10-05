@@ -180,6 +180,24 @@ export function deleteEntriesForArchive(database: DatabaseSync, archiveId: strin
   return result.changes;
 }
 
+/**
+ * 资料被恢复时，把它下面的入口一并恢复。
+ *
+ * **与 deleteEntriesForArchive 必须成对存在**：软删除是可逆的，
+ * 只做删除侧的级联而漏掉恢复侧，会得到一条"回来了但没有入口"的资料 ——
+ * 数据看起来正常、实际已经残废，比直接删掉更难发现。
+ * 实际就是这样踩到的：CLI `material rm` 后用 `trash restore` 恢复，
+ * 资料回来了但入口全没了。
+ */
+export function restoreEntriesForArchive(database: DatabaseSync, archiveId: string): number {
+  const result = execute(
+    database,
+    `UPDATE ${ENTRIES} SET deleted_at = NULL WHERE archive_id = ? AND deleted_at IS NOT NULL`,
+    archiveId,
+  );
+  return result.changes;
+}
+
 /** 按 id 顺序重排入口：第 n 个的 sort_order = n+1。用于"按常用程度排序" */
 export function reorderEntries(database: DatabaseSync, archiveId: string, orderedIds: readonly string[]): void {
   const now = nowIso();

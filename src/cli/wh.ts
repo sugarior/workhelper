@@ -61,6 +61,13 @@ const HELP = `WorkHelper ${VERSION} —— 常驻桌面的个人工作秘书
   log [日期] [正文]         查看每日汇总，或保存手写正文
   backup                    立即备份并轮换旧快照
   trash list|restore|purge  回收站（默认 list）
+  material ls [--orphan]    列出资料；--orphan 只看未挂靠的
+  material show <id>        看某条资料的入口与挂靠
+  material open <id>        只打印全部入口原文（复制用；文字入口不能打开）
+  material link <id> task:<任务id>|project:<项目id>
+                            追加挂靠
+  material unlink <id> ...  解除挂靠（最后一个不允许解除）
+  material rm <id>          删除资料（软删除，入口一并移除）
   settings [键 值]          查看或修改设置（日界小时用键 boundary）
   reindex                   重建检索索引
   verify                    完整性与业务自检
@@ -94,6 +101,13 @@ const STATUS_MARK: Readonly<Record<TaskStatus, string>> = {
   blocked: '[!]',
   done: '[x]',
   cancelled: '[-]',
+};
+
+/** 资料入口形态的中文名（`text` 单独标注，见 material show） */
+const ENTRY_KIND_LABEL_CLI: Readonly<Record<'dir' | 'file' | 'url', string>> = {
+  dir: '目录',
+  file: '文件',
+  url: '网址',
 };
 
 const PROGRESS_LABEL: Readonly<Record<ProgressKind, string>> = {
@@ -564,6 +578,133 @@ function commandTrash(context: CliContext, args: string[]): void {
   }
 }
 
+/**
+ * 资料子命令（F-11 ~ F-14 的命令行通路）。
+ *
+ * 为什么 CLI 也需要它：需求 §10 把 CLI 定为"保底通路" —— 界面一旦出问题，
+ * 至少还能看见与抢救数据。资料是**路径与实物的索引**，丢了很难重建，
+ * 因此它比任务更需要一条独立于界面的读取路径。
+ */
+function commandMaterial(context: CliContext, args: string[], values: Record<string, unknown>): void {
+  const { material } = context.services;
+  const action = args[0] ?? 'ls';
+
+  /** 解析挂靠目标：`task:<id前缀>` 或 `project:<id前缀>` */
+  function parseTarget(raw: string | undefined): { type: 'task' | 'project'; id: string } {
+    if (raw === undefined) throw new Error('请给出挂靠目标，形如 task:3f2a 或 project:3f2a');
+    const [kind, prefix] = raw.split(':');
+    if ((kind !== 'task' && kind !== 'project') || prefix === undefined || prefix.length === 0) {
+      throw new Error(`挂靠目标要写成 task:<id> 或 project:<id>，收到「${raw}」`);
+    }
+    const pool = kind === 'task'
+      ? context.services.planning.listTasks({}).map((task) => ({ id: task.id, title: task.title }))
+      : context.services.planning.listProjects({ includeArchived: true }).map((item) => ({ id: item.id, title: item.title }));
+    const matches = pool.filter((item) => item.id.startsWith(prefix));
+    if (matches.length === 0) throw new Error(`找不到${kind === 'task' ? '任务' : '项目'}「${prefix}」`);
+    if (matches.length > 1) {
+      const list = matches.map((item) => `  ${shortId(item.id)}  ${clip(item.title, 40)}`).join('\n');
+      throw new Error(`「${prefix}」匹配到 ${matches.length} 个，请多给几位：\n${list}`);
+    }
+    const found = matches[0];
+    if (found === undefined) throw new Error(`找不到「${prefix}」`);
+    return { type: kind, id: found.id };
+  }
+
+  /** 解析资料 id 前缀 */
+  function resolveMaterial(prefix: string | undefined): string {
+    if (prefix === undefined) throw new Error('请给出资料 id（可用 material ls 查看）');
+    const all = material.list({ orphanOnly: false, limit: 500 });
+    const matches = all.filter((item) => item.id.startsWith(prefix));
+    if (matches.length === 0) throw new Error(`找不到资料「${prefix}」`);
+    if (matches.length > 1) {
+      const list = matches.map((item) => `  ${shortId(item.id)}  ${clip(item.title ?? '', 40)}`).join('\n');
+      throw new Error(`「${prefix}」匹配到 ${matches.length} 条，请多给几位：\n${list}`);
+    }
+    const found = matches[0];
+    if (found === undefined) throw new Error(`找不到资料「${prefix}」`);
+    return found.id;
+  }
+
+  switch (action) {
+    case 'ls': {
+      // 注意：`--orphan` 会被选项解析器收走，**不在 args 里**。
+      // 一开始我写的是 `args.includes('--orphan')`，于是这个开关静默失效。
+      const orphanOnly = values.orphan === true;
+      const items = material.list({ orphanOnly, limit: 200 });
+      if (context.json) {
+        console.log(JSON.stringify(items, null, 2));
+        return;
+      }
+      if (items.length === 0) {
+        console.log(orphanOnly ? '没有未挂靠的资料' : '还没有资料');
+        return;
+      }
+      console.log(orphanOnly ? `未挂靠的资料（${items.length} 条）` : `资料（${items.length} 条）`);
+      for (const item of items) {
+        const links = item.links.map((link) => link.title).join(' + ') || '（无挂靠）';
+        console.log(`  ${shortId(item.id)}  ${clip(item.title ?? '（无标题）', 32)}`);
+        console.log(`        ${item.entries.length} 个入口 · 挂靠：${clip(links, 50)}`);
+      }
+      if (!orphanOnly) console.log('\n用 material show <id> 看入口，material open <id> 打印全部路径');
+      return;
+    }
+
+    case 'show': {
+      const id = resolveMaterial(args[1]);
+      const item = material.get(id);
+      if (context.json) {
+        console.log(JSON.stringify(item, null, 2));
+        return;
+      }
+      console.log(`${item.title ?? '（无标题）'}  ${shortId(item.id)}`);
+      console.log(`挂靠：${item.links.map((link) => `${link.type === 'task' ? '任务' : '项目'}：${link.title}`).join(' | ')}`);
+      item.entries.forEach((entry, index) => {
+        // 与界面同一口径：文字入口不能打开，标注出来免得在命令行里也误以为可以
+        const mark = entry.kind === 'text' ? '文字（不能打开）' : ENTRY_KIND_LABEL_CLI[entry.kind];
+        console.log(`  ${index + 1}. [${mark}] ${entry.target}`);
+        if (entry.note !== null && entry.note !== '') console.log(`       注释：${entry.note}`);
+      });
+      return;
+    }
+
+    case 'open': {
+      // 只打印路径，**不由 CLI 去启动程序**：跨平台启动器差异大，
+      // 而"打印出来让我自己复制"在任何环境下都不会失败（需求 §4.2 D6 的兜底思路）
+      const id = resolveMaterial(args[1]);
+      for (const target of material.entryTargets(id)) console.log(target);
+      console.log('\n以上是全部入口原文（文字入口不能打开，按需取用）');
+      return;
+    }
+
+    case 'link': {
+      const id = resolveMaterial(args[1]);
+      const target = parseTarget(args[2]);
+      const after = material.link(id, [target]);
+      console.log(`已挂靠到 ${after.links.map((link) => link.title).join(' + ')}`);
+      return;
+    }
+
+    case 'unlink': {
+      const id = resolveMaterial(args[1]);
+      const target = parseTarget(args[2]);
+      const after = material.unlink(id, target);
+      console.log(`已解除；剩余挂靠：${after.links.map((link) => link.title).join(' + ')}`);
+      return;
+    }
+
+    case 'rm': {
+      const id = resolveMaterial(args[1]);
+      const item = material.get(id);
+      material.remove(id);
+      console.log(`已删除资料「${clip(item.title ?? '', 40)}」（软删除，入口一并移除）`);
+      return;
+    }
+
+    default:
+      throw new Error(`未知的资料子命令「${action}」，可用：ls / show / open / link / unlink / rm`);
+  }
+}
+
 function commandStatus(context: CliContext): void {
   const version = currentVersion(context.database);
   const migrations = listMigrations().length;
@@ -752,6 +893,9 @@ async function main(): Promise<void> {
         return;
       case 'trash':
         commandTrash(context, rest);
+        return;
+      case 'material':
+        commandMaterial(context, rest, values);
         return;
       case 'settings':
         commandSettings(context, rest);

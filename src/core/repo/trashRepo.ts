@@ -6,6 +6,7 @@ import { execute, queryAll } from '../db/connection.ts';
 import { ENTITY_TYPES, enumGuard } from '../domain/types.ts';
 import type { EntityType } from '../domain/types.ts';
 import { NotFoundError, ValidationError } from '../domain/errors.ts';
+import { restoreEntriesForArchive } from './materialRepo.ts';
 
 /** 回收站保留天数 */
 export const TRASH_RETENTION_DAYS = 30;
@@ -185,6 +186,10 @@ export function restore(database: DatabaseSync, entityType: EntityType, entityId
   if (result.changes === 0) {
     throw new NotFoundError(`回收站中没有该${spec.label}：${entityId}`);
   }
+  // 资料是唯一带子表的实体：它的入口在删除时被一并软删除，
+  // 恢复时必须一起还原，否则会得到一条"回来了但没有入口"的资料 ——
+  // 数据看起来正常、实际已经残废（比直接删掉更难发现）。
+  if (entityType === 'archive') restoreEntriesForArchive(database, entityId);
 }
 
 /**
