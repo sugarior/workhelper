@@ -598,15 +598,58 @@ fn create_tray(app: &tauri::AppHandle) -> Result<(), String> {
         )
         .tooltip("工作秘书")
         .menu(&menu)
-        // 左键单击也弹菜单：Windows 上左键单击托盘图标弹菜单是常见预期，
-        // 而"左键单击做别的事、右键弹菜单"会让人以为左键没反应。
-        .show_menu_on_left_click(true)
+        // **左键不弹菜单**：左键改为直接显示主界面（用户建议）。
+        // 需求 F-16 原文是"托盘图标 + **右键菜单**"，因此左键留给主界面
+        // 与那一条一致；而"左键弹菜单"会让"左键显示主界面"根本无从实现。
+        //
+        // 实测背景：原来设的是 `true`，结果**左键弹菜单后点菜单项没有反应** ——
+        // 用户报告"点今日或收件箱都不行"。把左键让出来同时解决了那个问题。
+        .show_menu_on_left_click(false)
         .on_menu_event(|app, event| handle_tray_menu(app, event.id().as_ref()))
+        .on_tray_icon_event(|tray, event| {
+            use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                // 用 `Up` 而不是 `Down`：与按钮的语义一致（抬手才算点完），
+                // 也避免按住不放时反复触发。
+                toggle_main_window(tray.app_handle());
+            }
+        })
         .build(app)
         .map_err(|e| format!("构建托盘失败：{e}"))?;
 
-    println!("[shell] 系统托盘已就绪");
+    println!("[shell] 系统托盘已就绪（左键显示主界面 · 右键菜单）");
     Ok(())
+}
+
+/// 左键点托盘：主窗口可见就收起，不可见就显示。
+///
+/// **为什么做成开关而不是"总是显示"**：用户点托盘的意图通常是
+/// "我要看看它"；而窗口本来就在最前面时，再"显示"一次**看不出任何变化** ——
+/// 那会让人以为点了没反应。做成开关则每次点击都有可见结果。
+fn toggle_main_window(app: &tauri::AppHandle) {
+    use tauri::Manager;
+
+    let Some(window) = app.get_webview_window("main") else {
+        eprintln!("[shell] ✗ 找不到主窗口");
+        return;
+    };
+    // `is_visible()` 可能失败；失败时按"显示"处理 ——
+    // 那是最符合"我点了托盘想看到它"的意图
+    let visible = window.is_visible().unwrap_or(false);
+    if visible {
+        let _ = window.hide();
+        println!("[shell] 托盘：主窗口已收起");
+    } else {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        println!("[shell] 托盘：主窗口已显示");
+    }
 }
 
 /// 托盘菜单点击处理。
@@ -661,18 +704,31 @@ fn show_main_window(app: &tauri::AppHandle, tab: Option<&str>) {
         eprintln!("[shell] ✗ 找不到主窗口");
         return;
     };
-    // 窗口可能被"关闭主窗口不退出"藏起来了
-    let _ = window.show();
+    // 窗口可能被"关闭主窗口不退出"藏起来了。
+    // **每一步都报告失败**：`show()` 静默失败的表现就是"点了托盘菜单没反应"，
+    // 而那正是用户报告过的问题 —— 不能再让它无声无息。
+    if let Err(error) = window.show() {
+        eprintln!("[shell] ✗ 显示主窗口失败：{error}");
+    }
     let _ = window.unminimize();
-    let _ = window.set_focus();
+    if let Err(error) = window.set_focus() {
+        eprintln!("[shell] ✗ 聚焦主窗口失败：{error}");
+    }
 
     if let Some(tab) = tab {
         if let Some(slot) = app.try_state::<PendingTab>() {
-            if let Ok(mut guard) = slot.0.lock() {
-                *guard = Some(tab.to_string());
+            match slot.0.lock() {
+                Ok(mut guard) => *guard = Some(tab.to_string()),
+                Err(_) => eprintln!("[shell] ✗ 待切页签的锁被污染"),
             }
+        } else {
+            eprintln!("[shell] ✗ PendingTab 状态未注册（内部错误）");
         }
     }
+    println!(
+        "[shell] 托盘：显示主窗口{}",
+        tab.map(|t| format!("并切到「{t}」")).unwrap_or_default()
+    );
 }
 
 /// 托盘要求主窗口切到的页签；页面轮询取走。
@@ -1565,6 +1621,30 @@ fn main() {
 
     app.run(move |app_handle, event| {
         if let RunEvent::WindowEvent { label, event, .. } = &event {
+            // 关闭主窗口 = **收进托盘，不退出进程**（需求 F-16 的验收标准）。
+            //
+            // **注意它必须在 `label == WIDGET_LABEL` 判断之外**：
+            // 原来这条被写在悬浮组件的分支里，而主窗口的 label 是 `"main"` ——
+            // 于是 `prevent_close()` **从未执行**，主窗口被真的销毁，
+            // 之后 `get_webview_window("main")` 返回 None，
+            // 表现就是"关闭后托盘再也呼不出主界面"（用户报告）。
+            //
+            // 这个坑的形态值得记：**把"所有窗口都要处理的事"写进了"某个窗口的分支"**。
+            // 单看那段代码是对的，错在它所在的位置。
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if label == "main" {
+                    // Tauri 默认在最后一个窗口关闭时结束应用；
+                    // 不拦截的话进程照样退出 —— 那托盘就白做了。
+                    api.prevent_close();
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.hide();
+                    }
+                    println!("[shell] 主窗口已收进托盘（左键点托盘图标可再打开，或从托盘菜单退出）");
+                }
+                // 其它窗口（快记窗、悬浮组件）走默认行为：它们的关闭是真关闭，
+                // 因为快记窗每次都是重建的，悬浮组件由托盘菜单控制显隐。
+            }
+
             if label == WIDGET_LABEL {
                 match event {
                     // 拖动结束：把新位置写进配置。
@@ -1581,25 +1661,6 @@ fn main() {
                             state.0.store(true, std::sync::atomic::Ordering::SeqCst);
                         }
                     }
-
-                    // 关闭主窗口 = **收进托盘，不退出进程**（需求 F-16 的验收标准）。
-                    //
-                    // **这是托盘存在的核心意义**：它是"常驻桌面"这个形态的落点。
-                    // 不拦这一步的话，点 × 就把整个程序（含内核与悬浮组件）结束了，
-                    // 托盘图标也跟着消失 —— 那托盘就白做了。
-                    //
-                    // 真正退出走托盘菜单的「退出」。
-                    //
-                    // **必须 `prevent_close()`**：Tauri 默认在最后一个窗口关闭时
-                    // 结束应用（ExitRequested），只 `hide()` 不拦截的话进程照样退出。
-                    WindowEvent::CloseRequested { api, .. } => {
-                        api.prevent_close();
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            let _ = window.hide();
-                        }
-                        println!("[shell] 主窗口已收进托盘（从托盘菜单可退出）");
-                    }
-
                     // 悬浮组件失焦：**只在输入态才收起**。
                     //
                     // 为什么不无条件收起：idle 态的组件本来就不该有焦点
