@@ -282,7 +282,26 @@ export function createCaptureService(database: DatabaseSync): CaptureService {
   return {
     quickCapture(input) {
       const text = input.text;
-      // 去掉首尾空白；即使全是空白也照存，避免"我明明按了回车却没存"的错觉
+
+      /**
+       * 空输入不产生条目。
+       *
+       * **曾经这里是"即使全是空白也照存"**，理由是"避免我明明按了回车却没存的错觉"。
+       * 那个理由把两件事混为一谈了：
+       *   · **有内容** → 必须存（哪怕手滑多按了回车，或两端带空白）—— 这一点没变
+       *   · **什么都没有** → 不该产生条目：空条目在收件箱里就是垃圾，
+       *     点进去什么都没有，而且**没有任何可作为资料的内容**
+       *     （转资料时会被 §classify 的空正文校验挡下，等于制造了一条走不通的死条目）
+       *
+       * 放在服务层而不是只放在界面：界面是"顺手挡一下"，服务层才是"坏数据不可产生"
+       * （本项目第一类错误的对策——不变式级别的规则下沉，不指望每条调用路径都记得）。
+       * CLI 直接调服务，因此同样受保护。
+       */
+      if (text.trim().length === 0) {
+        throw new ValidationError('没有可记的内容 —— 写点什么再保存，或按 Esc 关掉。');
+      }
+
+      // 去掉首尾空白；两端带空白的内容照存（手滑多按回车不该丢内容）
       const trimmed = text.trim();
       const at = nowIso();
       const dayKey = dayKeyFromIso(at, boundaryHour());

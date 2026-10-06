@@ -44,11 +44,35 @@ test('快记：解析不到日期时原样保存，不产生 rawInput', () => {
   });
 });
 
-test('快记：空白输入也能保存，不抛错（不能出现"按了回车却没存"）', () => {
+test('快记：空白输入被拒绝，不产生空条目', () => {
   useDb((database) => {
     const capture = createCaptureService(database);
-    const { item } = capture.quickCapture({ text: '   ' });
+    // 原先这条断言的是"空白也能存"，理由是"不能出现按了回车却没存"。
+    // 那个理由把两件事混为一谈了：
+    //   · 有内容 → 必须存（哪怕手滑多按了回车）
+    //   · 什么都没有 → 不该产生条目（空条目在收件箱里就是垃圾，且没有可转出的内容）
+    // 空条目还有实际危害：它没有任何可作为资料的内容（见 classify→archive 的校验）。
+    assert.throws(() => capture.quickCapture({ text: '   ' }), /没有可记的内容/);
+    assert.equal(capture.countPending(), 0);
+  });
+});
+
+test('快记：只有换行/制表符也算空', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    assert.throws(() => capture.quickCapture({ text: '\n' }), /没有可记的内容/);
+    assert.throws(() => capture.quickCapture({ text: '\t \r\n ' }), /没有可记的内容/);
+    assert.equal(capture.countPending(), 0);
+  });
+});
+
+test('快记：有内容但两端是空白时，仍然保存', () => {
+  useDb((database) => {
+    const capture = createCaptureService(database);
+    // 「手滑多按了回车」的情形必须照存 —— 这才是原来那条测试想守的东西
+    const { item } = capture.quickCapture({ text: '  真的要记的事  \n\n' });
     assert.equal(item.status, 'pending');
+    assert.equal(item.body, '真的要记的事');
     assert.equal(capture.countPending(), 1);
   });
 });

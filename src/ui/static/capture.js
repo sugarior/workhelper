@@ -78,6 +78,20 @@ textarea.addEventListener('input', () => {
 
 function showError(message) {
   errorBox.textContent = message;
+  // 默认错误色。成功提示（关不掉窗口时那句）会自己改成绿色并保持不变，
+  // 因此每次真正报错都要把它复位 —— 否则"上一条成功"会把下一条错误染成绿的。
+  errorBox.style.color = '';
+}
+
+/**
+ * 空输入的就地提示。
+ *
+ * 与 showError 分开，是因为**它不该被当成错误重置**：用户还没开始写，
+ * 这不是"保存失败"，只是一句提示。用中性色，避免一按回车就满屏红字。
+ */
+function showEmptyHint() {
+  errorBox.textContent = '没有可记的内容 —— 写点什么再保存，或按 Esc 关掉。';
+  errorBox.style.color = 'var(--text-dim)';
 }
 
 /** 保存成功后收起窗口。浏览器里能关就关；关不掉则退化成一次性提示。 */
@@ -102,6 +116,20 @@ async function save() {
   if (finished) return;
   const text = textarea.value;
   errorBox.textContent = '';
+
+  /**
+   * 空输入就地提示，不发请求、不关窗。
+   *
+   * 服务层也有同样的守卫（`quickCapture` 抛校验错），这里是**顺手挡一下**：
+   * 让用户看到一句人话，而不是把请求打出去再显示一条接口错误。
+   * 两层都要有 —— 界面挡的是"这次操作"，服务层挡的是"坏数据不可产生"
+   * （CLI 也直接调服务，因此同样受保护）。
+   */
+  if (text.trim().length === 0) {
+    showEmptyHint();
+    textarea.focus();
+    return;
+  }
 
   saveButton.disabled = true;
   try {
