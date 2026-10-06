@@ -106,15 +106,14 @@ fn wait_until_ready(started: Instant) -> Result<Duration, String> {
 }
 
 /// 拉起内核服务，返回子进程。
-fn spawn_kernel(repo_root: &Path) -> Result<Child, String> {
+fn spawn_kernel(paths: &RuntimePaths) -> Result<Child, String> {
     let node = find_node()?;
-    let entry = repo_root.join("src").join("ui").join("main.ts");
+    let entry = paths.kernel_root.join("src").join("ui").join("main.ts");
     if !entry.is_file() {
         return Err(format!("内核入口不存在：{}", entry.display()));
     }
 
     println!("[shell] node      = {}", node.display());
-    println!("[shell] 仓库根    = {}", repo_root.display());
     println!("[shell] 内核入口  = {}", entry.display());
 
     let mut command = Command::new(&node);
@@ -122,14 +121,20 @@ fn spawn_kernel(repo_root: &Path) -> Result<Child, String> {
         .arg(&entry)
         .arg("--port")
         .arg(PORT.to_string())
+        // 数据目录由外壳显式传入（B3-2）。
+        // **不能靠内核自己推导**：打包后内核在 <安装目录>\resources\src\ 下，
+        // 它推导出的默认目录会落在 Program Files 里 —— 那里不可写。
+        // 外壳还负责解析用户的覆盖配置，并把目录**实际可写**验证过（见 resolve_runtime_paths）。
+        .arg("--data")
+        .arg(&paths.data_dir)
         // 把自身 PID 交给内核：外壳被强杀时（崩溃、任务管理器结束），
         // 外壳自己的退出处理不会执行，内核必须能自己发现宿主没了。
         // Windows 没有"父进程死了子进程跟着死"的默认行为 —— B2-a 实测确认过。
         .arg("--parent-pid")
         .arg(std::process::id().to_string())
-        // 工作目录设为仓库根：内核自己按脚本位置推导数据目录，
-        // 但保持一致可以避免"两份不同的相对路径"这类困惑
-        .current_dir(repo_root)
+        // 工作目录设为内核根：内核按脚本位置推导它自己的相对基准，
+        // 保持一致可以避免"两份不同的相对路径"这类困惑
+        .current_dir(&paths.kernel_root)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .stdin(Stdio::null());
@@ -289,16 +294,157 @@ fn open_capture_window(app: &tauri::AppHandle) {
     }
 }
 
+/// 应用名，用于 `%APPDATA%` 下的目录名与配置文件位置。
+const APP_DIR_NAME: &str = "WorkHelper";
+
+/// 内存中的自检结果（B3-3 会扩充），这里先承载数据目录的解析结果。
+struct RuntimePaths {
+    /// 内核源码树所在目录（含 `src/ui/main.ts` 的那一级）
+    kernel_root: PathBuf,
+    /// 数据目录（已确保存在且可写）
+    data_dir: PathBuf,
+    /// 开发态还是打包态
+    dev: bool,
+}
+
+/// 判断是开发态还是打包态。
+///
+/// **判据：编译时注入的仓库根是否仍然存在**（`build.rs` 写入的 `WORKHELPER_REPO_ROOT`）。
+/// 它存在且包含 `shell/src-tauri/Cargo.toml` → 开发态；否则 → 打包态。
+///
+/// **为什么不能从可执行文件向上找**：`target-dir` 被指到 `D:/cargo-target/`（为了不撑爆 C 盘），
+/// 于是可执行文件在 `D:\cargo-target\...\debug\`，**与仓库根没有共同祖先** ——
+/// 从它上溯永远找不到 `shell/`。这个坑本文件里已经栽过两次
+/// （`find_repo_root` 与 `target-dir` 归位），所以判据一律以**编译时注入**为准。
+///
+/// 判错的方向很重要：把打包态误判成开发态会导致写 `Program Files` 失败，
+/// 因此这里的条件要求**同时**满足"路径存在"与"含 Cargo.toml"，宁可偏向判为打包态。
+fn detect_dev_mode() -> bool {
+    let Some(root) = option_env!("WORKHELPER_REPO_ROOT") else {
+        return false;
+    };
+    let path = Path::new(root);
+    path.join("shell").join("src-tauri").join("Cargo.toml").is_file()
+        && path.join("src").join("ui").join("main.ts").is_file()
+}
+
+/// `%APPDATA%\WorkHelper`，即配置与（默认）数据的根。取不到就退回用户主目录。
+fn app_data_root() -> Result<PathBuf, String> {
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        if !appdata.is_empty() {
+            return Ok(PathBuf::from(appdata).join(APP_DIR_NAME));
+        }
+    }
+    // 非 Windows 或环境异常时的退路：用户主目录下
+    std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map(|home| PathBuf::from(home).join(format!(".{APP_DIR_NAME}")))
+        .map_err(|_| "既取不到 APPDATA 也取不到用户主目录".to_string())
+}
+
+/// 读取配置文件里的数据目录覆盖值。
+///
+/// **为什么配置放在 `%APPDATA%` 而不是数据目录里**：数据目录本身是可被改的，
+/// 把"数据目录在哪"记在数据目录里就成了循环依赖 —— 改完下次就找不到配置了。
+///
+/// **为什么放在 `%APPDATA%` 而不是程序目录旁**：程序目录可能不可写（安装在
+/// `Program Files`），而"我想改数据目录"这件事**恰恰可能就是因为程序目录不可写**。
+///
+/// 配置文件不存在或格式不对时**返回 None 并继续**（用默认值），
+/// 因为一个坏掉的配置文件不该让程序完全起不来。
+fn configured_data_dir(root: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(root.join("config.json")).ok()?;
+    // 只认这一个字段，因此不引入 JSON 依赖：手写解析对固定形状足够可靠
+    let key = "\"dataDir\"";
+    let start = text.find(key)? + key.len();
+    let rest = &text[start..];
+    let colon = rest.find(':')? + 1;
+    let after = rest[colon..].trim_start();
+    let quote = after.find('"')? + 1;
+    let tail = &after[quote..];
+    let end = tail.find('"')?;
+    let value = &tail[..end];
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(value))
+    }
+}
+
+/// 确认目录存在且**真的可写**。
+///
+/// **必须实际写一个文件验证**：只检查 `is_dir()` 会漏掉"目录在但只读"的情况
+/// （安装在 `Program Files`、被安全软件锁、只读盘），
+/// 那种情况要等到建库时才失败，错误信息还指向数据库而不是权限。
+fn ensure_writable(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("建不出目录 {}：{e}", dir.display()))?;
+    let probe = dir.join(".write-probe");
+    std::fs::write(&probe, b"ok").map_err(|e| {
+        format!("数据目录不可写：{}（{e}）", dir.display())
+    })?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
+/// 解析运行时路径：内核源码树 + 数据目录。
+fn resolve_runtime_paths() -> Result<RuntimePaths, String> {
+    let dev = detect_dev_mode();
+
+    // 内核源码树：
+    //   开发态 —— 编译时注入的仓库根
+    //   打包态 —— <可执行文件目录>\resources（B3-3 会把 src/ 打进去）
+    let kernel_root = if dev {
+        find_repo_root()?
+    } else {
+        let exe = std::env::current_exe().map_err(|e| format!("取不到自身路径：{e}"))?;
+        let dir = exe.parent().ok_or("可执行文件没有父目录")?.to_path_buf();
+        let resources = dir.join("resources");
+        if resources.join("src").join("ui").join("main.ts").is_file() {
+            resources
+        } else {
+            return Err(format!(
+                "打包形态下找不到内核资源：期望 {} 存在。安装可能不完整，建议重新安装。",
+                resources.join("src").join("ui").join("main.ts").display()
+            ));
+        }
+    };
+
+    // 数据目录优先级：用户配置 > 形态默认值
+    //
+    // **两种形态的默认值不同，这是有意的**：
+    //   · 开发态 → 仓库的 `data/` —— 保持开发者已有的数据、也让测试可预期。
+    //     若开发态也跳到 %APPDATA%，表现是"我的数据不见了"（其实是换了库），
+    //     而且与"浏览器里开发照旧"这个验收标准直接冲突。
+    //   · 打包态 → `%APPDATA%\WorkHelper\data` —— 安装目录不可写，必须换地方。
+    let root = app_data_root()?;
+    let data_dir = configured_data_dir(&root).unwrap_or_else(|| {
+        if dev {
+            kernel_root.join("data")
+        } else {
+            root.join("data")
+        }
+    });
+    ensure_writable(&data_dir)?;
+
+    Ok(RuntimePaths { kernel_root, data_dir, dev })
+}
+
 fn main() {
     let started = Instant::now();
 
-    let repo_root = match find_repo_root() {
-        Ok(root) => root,
+    let paths = match resolve_runtime_paths() {
+        Ok(value) => value,
         Err(message) => {
             eprintln!("[shell] 致命错误：{message}");
             std::process::exit(1);
         }
     };
+    println!(
+        "[shell] 形态      = {}",
+        if paths.dev { "开发态" } else { "打包态" }
+    );
+    println!("[shell] 内核根目录 = {}", paths.kernel_root.display());
+    println!("[shell] 数据目录   = {}", paths.data_dir.display());
 
     // 端口已被占用时不重复拉起 —— 内核是单实例设计，
     // 第二个进程会因端口冲突失败（或更糟：两个进程写同一个库）
@@ -306,7 +452,7 @@ fn main() {
         println!("[shell] 端口 {PORT} 已有服务在跑，复用它（不重复拉起内核）");
         None
     } else {
-        match spawn_kernel(&repo_root) {
+        match spawn_kernel(&paths) {
             Ok(child) => Some(child),
             Err(message) => {
                 eprintln!("[shell] 致命错误：{message}");
