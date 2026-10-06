@@ -89,8 +89,13 @@ async function render(tab) {
     mount(viewBox, el('div', { class: 'empty' }, `加载失败：${error.message}`));
   }
   void refreshBadges();
-  // 焦点条要跟着刷新：任务可能在这里被聚焦/完成/卡住，焦点也就变了
-  void renderFocusBar(focusBar, refresh);
+  // 焦点条要跟着刷新：任务可能在这里被聚焦/完成/卡住，焦点也就变了。
+  //
+  // **必须 await**：它内部会 mount 出新的输入框，并把模块级的
+  // `focusBarInput` 指向新元素。不等待的话，调用方在它返回前就去聚焦
+  // —— 那时拿到的是**刚被替换掉的旧元素**，对它调 `focus()` 不报错但完全无效。
+  // 这正是"按了记一笔热键、光标却没进输入框"的原因。
+  await renderFocusBar(focusBar, refresh);
 }
 
 tabsBox.addEventListener('click', (event) => {
@@ -182,11 +187,93 @@ document.addEventListener('keydown', (event) => {
   // 与速记板刻意分开：混在一起会把新想法误记到当前任务上。
   if (event.ctrlKey && event.shiftKey && event.code === 'Space') {
     event.preventDefault();
-    if (!focusNoteInput()) flash('还没有聚焦的任务，先去「全部」里对一条任务点「聚焦」', 'error');
+    focusNoteFromShortcut();
   }
 });
 
-// 页面重新获得焦点时刷新，这样从快记窗回来就能看到新记录
-window.addEventListener('focus', () => void refresh());
+/**
+ * 让「记一笔」输入框就位；没有焦点任务时说清原因。
+ *
+ * **为什么"没有焦点任务"必须显式说出来**：那一刻用户的意图是"记一笔"，
+ * 而系统做不了。如果什么都不显示，用户只会觉得"按了没反应" ——
+ * 需求 F-05 明确要避免这种形态（热键静默失效是最难排查的）。
+ */
+function focusNoteFromShortcut() {
+  const ok = focusNoteInput();
+  if (!ok) {
+    flash('还没有聚焦的任务 —— 先去「全部」里对一条任务点「聚焦」', 'error');
+  }
+  return ok;
+}
+
+/**
+ * 桌面壳里的全局热键（F-15c）通过**标记 + 轮询**通知本页面。
+ *
+ * **与上面那段键盘监听的分工**：
+ *   · 页面有焦点时 —— 页面自己的监听就够，不需要外壳参与
+ *   · 页面没焦点时 —— 只有外壳的全局热键能收到，它把窗口带到前面并置一个标记
+ * 两条路最后都调用同一个 `focusNoteFromShortcut()`，
+ * **不是两套功能**（需求 F-15c 的原话："同一个动作的两个位置"）。
+ *
+ * **为什么是轮询而不是事件**：页面侧唯一被实测证明可靠的 Tauri 能力是 `invoke`
+ * （命令调用）；事件插件在 `__TAURI_INTERNALS__` 上的调用形态没有验证过，
+ * 而本项目已经因为"没验证就下手"在快记窗上耗过很久。这里只走 `invoke` 一条路。
+ *
+ * **轮询只在窗口有焦点时进行** —— 没焦点时按热键，外壳会把窗口带到前面，
+ * 随之触发 focus 事件开始轮询。因此空转极少（每 200ms 一次本地命令调用）。
+ */
+let notePoller = null;
+
+function startNotePolling() {
+  const internals = globalThis.__TAURI_INTERNALS__;
+  if (!internals || typeof internals.invoke !== 'function' || notePoller !== null) return;
+  notePoller = setInterval(() => {
+    void (async () => {
+      try {
+        // 外壳取值即清零，因此一次按键只会被取走一次
+        if (await internals.invoke('take_note_request')) await acceptNoteRequest();
+      } catch {
+        // 取不到就跳过这一轮：这不是用户可见的功能，不该因为一次失败就弹错
+      }
+    })();
+  }, 200);
+}
+
+function stopNotePolling() {
+  if (notePoller === null) return;
+  clearInterval(notePoller);
+  notePoller = null;
+}
+
+/**
+ * 热键生效：把焦点放进「记一笔」输入框。
+ *
+ * **必须先刷新再聚焦**：`window` 的 focus 事件会触发整页重绘，
+ * 而重绘会把焦点条的输入框换成新元素 —— 这时旧的引用已经不在文档里，
+ * 聚焦它等于没聚焦（用户看到"按了热键但光标不在输入框"）。
+ */
+async function acceptNoteRequest() {
+  stopNotePolling();
+  await refresh();
+  const ok = focusNoteFromShortcut();
+  const internals = globalThis.__TAURI_INTERNALS__;
+  // 回话让外壳知道结果。失败不影响用户 —— 提示已经由 focusNoteFromShortcut 显示。
+  try {
+    await internals.invoke('report_note_result', { accepted: ok });
+  } catch {
+    // 静默：这只是外壳侧的日志
+  }
+}
+
+// 页面重新获得焦点时刷新，这样从快记窗回来就能看到新记录。
+// 顺带开始轮询「记一笔」热键标记 —— 外壳正是把窗口带到前面来通知我们的。
+window.addEventListener('focus', () => {
+  void refresh();
+  startNotePolling();
+});
+window.addEventListener('blur', stopNotePolling);
+
+// 窗口一开始就是聚焦的，因此启动时也要轮询（只靠 focus 事件会漏掉首次）
+startNotePolling();
 
 void render('inbox');

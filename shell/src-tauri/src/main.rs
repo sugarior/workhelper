@@ -199,12 +199,23 @@ fn kill_tree(child: &mut Child) {
     println!("[shell] 内核已退出");
 }
 
-/// 全局热键（实验 B2-b）。用户确认要 `Ctrl+Alt+Space`。
+/// 快记浮窗的全局热键。用户确认要 `Ctrl+Alt+Space`。
 ///
 /// 用字符串解析而不是构造 `Modifiers`/`Code`：解析失败时错误信息里带着原始
 /// 字符串，排查"哪个键没被识别"更容易；而且以后要做成可配置的，
 /// 存字符串直接就能用。
-const HOTKEY: &str = "ctrl+alt+Space";
+const HOTKEY_CAPTURE: &str = "ctrl+alt+Space";
+
+/// 「记一笔」的全局热键（需求 F-15c）。
+///
+/// **与快记的区别**：快记是"开个小窗、记一条到收件箱"；
+/// 记一笔是"记到**当前焦点任务**的时间线上"，因此不需要开窗 ——
+/// 它把主窗口带到前面，并把焦点放进顶部常驻条的输入框。
+///
+/// 需求 F-15c 说"顶部常驻条也提供同一入口（同一个动作的两个位置，不是两套功能）"，
+/// 因此这里**复用**焦点条那套 UI（类型选择 + 输入框），不另做一个小窗 ——
+/// 另做一套就意味着两处都要维护"记到哪、有哪些类型"。
+const HOTKEY_NOTE: &str = "ctrl+shift+Space";
 
 /// 快记窗的标签。用它判断窗口是否已存在（复用而不是每次新建）。
 const CAPTURE_LABEL: &str = "capture";
@@ -304,6 +315,70 @@ fn open_capture_window(app: &tauri::AppHandle) {
         Err(error) => eprintln!("[shell] ✗ 创建快记窗失败：{error}"),
     }
 }
+/// 全局热键「记一笔」：把主窗口带到前面，并**置一个"待处理"标记**等页面来取。
+///
+/// **为什么不开小窗**：记一笔记到**当前焦点任务**，目标已经由焦点决定了；
+/// 再开一个窗只是把同一套 UI 复制一份。需求 F-15c 明确"顶部常驻条也提供同一入口
+/// （同一个动作的两个位置，不是两套功能）"，因此这里复用焦点条。
+///
+/// **为什么用"标记 + 页面轮询"而不是事件**：
+/// 页面侧唯一被实测证明可靠的能力是 `invoke`（命令调用）；事件插件在
+/// `__TAURI_INTERNALS__` 上的调用形态没有验证过，而本项目已经因为"没验证就下手"
+/// 在快记窗上耗过很久。标记 + 轮询只用到 `invoke` 这一条路，行为可预期。
+/// 页面在窗口获得焦点后才轮询，因此空转极少（每 200ms 一次本地命令调用）。
+///
+/// 需求 F-15c 的"从按键到记完 ≤ 3 秒"里，这个轮询最多贡献 200ms 延迟 ——
+/// 而窗口置前本身就要几百毫秒，用户感受不到差别。
+fn request_note_input(app: &tauri::AppHandle) {
+    use tauri::Manager;
+
+    let Some(window) = app.get_webview_window("main") else {
+        eprintln!("[shell] ✗ 找不到主窗口，无法记一笔");
+        return;
+    };
+
+    // 置标记。页面取走时清零（见 take_note_request）。
+    match app.try_state::<NoteRequest>() {
+        Some(state) => state.0.store(true, std::sync::atomic::Ordering::SeqCst),
+        // 状态没注册是内部错误（`.manage` 漏了），必须说出来而不是静默无反应
+        None => eprintln!("[shell] ✗ 记一笔：NoteRequest 状态未注册（内部错误）"),
+    }
+
+    // 先让窗口可见并置前：窗口可能被最小化或藏在别的程序后面
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+}
+
+/// 「记一笔」热键被按下、等着页面来取。
+///
+/// 用 `AtomicBool` 而不是 `Mutex<bool>`：它只有"置位/取值并清零"这一个用法，
+/// 原子量语义更直接，也不会因为忘记解锁而卡住。
+struct NoteRequest(std::sync::atomic::AtomicBool);
+
+/// 页面调用：取走「记一笔」请求。返回 true 表示这次该聚焦输入框。
+///
+/// **取值即清零**（`swap(false)`）—— 这样一次按键只生效一次；
+/// 若只读不清，页面每次轮询都会重复聚焦，用户就没法用鼠标去别处。
+#[tauri::command]
+fn take_note_request(state: tauri::State<'_, NoteRequest>) -> bool {
+    state.0.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// 页面调用：告诉外壳「记一笔」有没有落点（有没有焦点任务）。
+///
+/// **只有页面知道这件事**（`focusNoteInput()` 的返回值），外壳判断不了。
+/// 没有焦点任务时用户的本意是"记一笔"而系统做不了 —— 必须说出来，
+/// 否则用户只会觉得"按了没反应"（需求 F-05 明确要避免的形态）。
+#[tauri::command]
+fn report_note_result(accepted: bool) {
+    if accepted {
+        println!("[shell] 记一笔：输入框已就位");
+    } else {
+        println!("[shell] 记一笔：没有焦点任务，已提示用户先选一个");
+    }
+}
+
 /// 应用名，用于 `%APPDATA%` 下的目录名与配置文件位置。
 const APP_DIR_NAME: &str = "WorkHelper";
 
@@ -507,17 +582,37 @@ fn main() {
     // 注册失败必须**明确报错**而不是静默失效（需求 F-05）：
     // 热键被别的软件占用时用户唯一的感受就是"按了没反应"，那是最难排查的形态。
     let shortcut_plugin = tauri_plugin_global_shortcut::Builder::new()
-        .with_handler(|app, _shortcut, event| {
+        .with_handler(|app, shortcut, event| {
             // 只在**按下**时响应。不判断的话按键释放会再触发一次，
             // 表现为"窗口闪两下"。
-            if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+            if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                return;
+            }
+
+            // 两个热键共用一个 handler（全局只有一个 handler），因此必须分辨是哪一个。
+            // 用 `matches` 比对解析结果，字符串常量只有一份，不另抄一遍键名 ——
+            // 抄一遍就是"同一规则写在两处"。
+            let capture = HOTKEY_CAPTURE.parse::<tauri_plugin_global_shortcut::Shortcut>();
+            if capture.is_ok_and(|s| s == *shortcut) {
                 open_capture_window(app);
+                return;
+            }
+
+            let note = HOTKEY_NOTE.parse::<tauri_plugin_global_shortcut::Shortcut>();
+            if note.is_ok_and(|s| s == *shortcut) {
+                request_note_input(app);
             }
         })
         .build();
 
     let app = builder
-        .invoke_handler(tauri::generate_handler![hide_capture_window])
+        .invoke_handler(tauri::generate_handler![
+            hide_capture_window,
+            take_note_request,
+            report_note_result,
+        ])
+        // 「记一笔」热键的待处理标记。页面在窗口获得焦点后轮询取走它。
+        .manage(NoteRequest(std::sync::atomic::AtomicBool::new(false)))
         .setup(move |app| {
             println!(
                 "[shell] 应用就绪，从进程启动算起 {} ms",
@@ -529,12 +624,17 @@ fn main() {
             // 因此不能放在这里 eval。
 
             // 这里注册热键；冲突时 give up 并说清怎么办
+            //
+            // 两个热键分别注册、分别报错：一个被占用不该影响另一个可用，
+            // 而"哪个失败了"对用户来说是关键信息。
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
-            match app.global_shortcut().register(HOTKEY) {
-                Ok(()) => println!("[shell] 全局热键已注册：{HOTKEY}"),
-                Err(error) => {
-                    eprintln!("[shell] ✗ 全局热键 {HOTKEY} 注册失败：{error}");
-                    eprintln!("[shell]   多半是被其它软件占用。可改 HOTKEY 常量换一个组合。");
+            for (label, hotkey) in [("快记", HOTKEY_CAPTURE), ("记一笔", HOTKEY_NOTE)] {
+                match app.global_shortcut().register(hotkey) {
+                    Ok(()) => println!("[shell] 全局热键已注册（{label}）：{hotkey}"),
+                    Err(error) => {
+                        eprintln!("[shell] ✗ 全局热键 {hotkey}（{label}）注册失败：{error}");
+                        eprintln!("[shell]   多半是被其它软件占用。可改 main.rs 里的热键常量换一个组合。");
+                    }
                 }
             }
             Ok(())
