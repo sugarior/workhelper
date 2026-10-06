@@ -6,14 +6,18 @@
   <title>快记 · WorkHelper</title>
   <!-- 样式与脚本都带版本参数：**缓存失效必须覆盖所有静态资源**。
        此前只有 capture.js 带版本，于是改了 CSS 之后 WebView 仍用旧样式。 -->
-  <link rel="stylesheet" href="/app.css?v=0.15.0">
+  <link rel="stylesheet" href="/app.css?v=0.21.0">
 </head>
 <body class="capture">
   <!-- 标题栏。Windows 弹窗的形态标志不是"角落里有个关闭按钮"，
        而是**一条带标题的栏 + 右端方形关闭按钮** —— 没有它，浮窗看起来
        像一段裸内容而不是一个窗口。
        标题用「快记」而不是「记一句」：与功能名、主界面的「＋ 快记」按钮一致。 -->
-  <div class="capture-titlebar">
+  <!-- 标题栏可拖动（`deep`）。
+       **必须用 `deep` 而不是裸属性**：裸属性在 Tauri 里的语义是
+       "只有直接点在这个元素上才拖"，而这条栏里有标题文字与关闭按钮，
+       用户点到的是子元素 —— 于是完全拖不动（悬浮组件上实测踩过同一个坑）。 -->
+  <div class="capture-titlebar" data-tauri-drag-region="deep">
     <span class="capture-title">快记</span>
     <!-- 兜底关闭：浮窗没有系统标题栏，而"保存后自动收起"与 Esc 都依赖页面脚本；
          脚本一旦失效就没有任何关闭途径（实测遇到过一次，只能去杀进程）。 -->
@@ -47,6 +51,6 @@
     <div class="error-line" id="error"></div>
   </div>
 
-  <script type="module" src="/capture.js?v=0.15.0"></script>
+  <script type="module" src="/capture.js?v=0.21.0"></script>
 </body>
 </html>

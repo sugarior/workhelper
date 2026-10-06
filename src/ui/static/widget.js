@@ -106,26 +106,40 @@ let candidateIndex = 0;
  *   · 按热键时**还没有**焦点任务 —— 把缺的那一步补上
  *   · **点击小条上的任务名** —— 随时换一件（原来只能在无焦点时才能换）
  *
+ * **先显示再填内容**（用户反馈"很卡"）：
+ * 原来是 `await loadCandidates()` 之后才把面板显示出来 —— 打开前要等一次
+ * 网络往返，而点击/按键本来就要求即时反馈。现在立刻显示"读取中…"，
+ * 列表到了再替换。
+ *
  * 候选数据来自 `focusCandidates()` —— **与主界面聚焦条的下拉同一份**
  * （同一个服务方法、同一个口径：排入今日 + 截止日已到 + 当前焦点例外）。
  * 需求 F-15c 要求"同一个动作的两个位置，不是两套功能"，因此不另写一套筛选。
  */
-async function enterPickMode() {
-  const list = await loadCandidates();
-  if (list.length === 0) {
-    // 一条可聚焦的都没有：这时候弹一个空列表只会让人困惑，
-    // 直接说清该去哪儿建任务
-    showError('没有可聚焦的任务 —— 先去主界面建一条，或把它排入今日');
-    return;
-  }
-  candidates = list;
-  // 默认落在当前焦点那一条上，而不是第一条 ——
-  // 用户点开多半是想换，从"我现在这条"开始移动比从列表头开始更顺手。
-  const current = list.findIndex((item) => item.isFocused);
-  candidateIndex = current >= 0 ? current : 0;
+function enterPickMode() {
+  candidates = [];
+  candidateIndex = 0;
+  // 立刻切形态：这一帧就可见，不等网络
   document.body.classList.add('mode-pick');
-  renderCandidates();
-  document.querySelector('.pick-item.active')?.scrollIntoView({ block: 'nearest' });
+  mount(pickList, [el('li', { class: 'pick-item pick-loading' }, '读取中…')]);
+  showError('');
+
+  void (async () => {
+    const list = await loadCandidates();
+    // 期间用户可能已经关掉了面板（点了别处 / 按了 Esc）
+    if (!document.body.classList.contains('mode-pick')) return;
+    if (list.length === 0) {
+      exitPickMode();
+      showError('没有可聚焦的任务 —— 先去主界面建一条，或把它排入今日');
+      return;
+    }
+    candidates = list;
+    // 默认落在当前焦点那一条上，而不是第一条 ——
+    // 用户点开多半是想换，从"我现在这条"开始移动比从列表头开始更顺手。
+    const current = list.findIndex((item) => item.isFocused);
+    candidateIndex = current >= 0 ? current : 0;
+    renderCandidates();
+    document.querySelector('.pick-item.active')?.scrollIntoView({ block: 'nearest' });
+  })();
 }
 
 function exitPickMode() {
@@ -266,19 +280,26 @@ function startPolling() {
         void reportResult(true);
       } else {
         void reportResult(false);
-        await enterPickMode();
+        enterPickMode();
       }
     })();
   }, 150);
 }
 
 /**
- * 失焦即收起。
+ * 失焦即收起（输入态与选焦点态都适用）。
  *
- * **只在输入态需要**：idle 时组件本来就不该抢焦点，失焦是常态。
- * 而且失焦收起**不提交** —— 用户点了别处说明改主意了，替他保存是自作主张。
+ * **为什么会走到这里**：悬浮窗是**很小的一块**（360×260），用户点"别处"
+ * 绝大多数时候是点在**窗口之外**（桌面或别的程序）—— 那种点击在页面里
+ * 没有事件，只有窗口失焦能感知到。因此这条是"点别处收起"的主要通路。
+ *
+ * 两个形态都不提交：用户点了别处说明改主意了，替他保存是自作主张。
  */
 window.addEventListener('blur', () => {
+  if (document.body.classList.contains('mode-pick')) {
+    exitPickMode();
+    return;
+  }
   if (document.body.classList.contains('mode-input')) exitInputMode();
 });
 
@@ -305,7 +326,15 @@ noteInput.addEventListener('keydown', (event) => {
  */
 document.addEventListener('keydown', (event) => {
   if (!document.body.classList.contains('mode-pick')) return;
-  if (candidates.length === 0) return;
+  if (candidates.length === 0) {
+    // 列表还没到（"读取中…"）：只允许 Esc 关掉，别让方向键空转
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      exitPickMode();
+      void invokeShell('collapse_widget');
+    }
+    return;
+  }
 
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
     event.preventDefault();
@@ -329,6 +358,22 @@ document.addEventListener('keydown', (event) => {
     exitPickMode();
     void invokeShell('collapse_widget');
   }
+});
+
+/**
+ * 点击面板**之外**的页面区域也收起选焦点栏（用户要求）。
+ *
+ * 为什么还需要这一条（`window.blur` 已经覆盖了窗口外）：窗口内、面板之外
+ * 还有一条小横栏与下面的透明区域 —— 点那里时窗口**不失焦**，
+ * `blur` 不会触发，而用户的感受就是"点了别处却没收起"。
+ *
+ * 用 `mousedown` 而不是 `click`：与浮层类交互的惯例一致，
+ * 而且按下时就该有反馈，不必等抬手。
+ */
+document.addEventListener('mousedown', (event) => {
+  if (!document.body.classList.contains('mode-pick')) return;
+  if (document.getElementById('pick')?.contains(event.target)) return;
+  exitPickMode();
 });
 
 saveButton.addEventListener('click', () => void submit());

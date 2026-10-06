@@ -663,6 +663,14 @@ body.mode-pick .widget-pick { display: block; }
 .pick-item:hover { background: rgba(255, 255, 255, 0.1); }
 .pick-item.active:hover { background: rgba(74, 158, 255, 0.34); }
 
+/* "读取中…"占位：与真实条目同样的高度与内边距，
+   这样列表到达时不会跳一下 */
+.pick-loading {
+  color: #7b8188;
+  cursor: default;
+  padding: 5px 7px;
+}
+
 .pick-title {
   flex: 1 1 auto;
   min-width: 0;

@@ -273,6 +273,14 @@ fn open_capture_window_command(app: tauri::AppHandle) {
     open_capture_window(&app);
 }
 
+/// "正在重建快记窗"的守卫。
+///
+/// **为什么需要**：重建要经"后台线程等 80ms → 回主线程建窗口"两步。
+/// 这期间若又按了一次热键或点了按钮，就会排队第二次重建 ——
+/// 两次撞在同一个 label 上，后一次必然失败。
+/// 置位期间忽略后续请求：用户连按几下，得到的是**一个**窗口，不是一串错误。
+struct CaptureRebuilding(std::sync::atomic::AtomicBool);
+
 /// 打开快记窗：**每次都销毁重建**。
 ///
 /// **必须走应用协议**（`WebviewUrl::App`）而不是外部 http 地址 ——
@@ -286,59 +294,62 @@ fn open_capture_window_command(app: tauri::AppHandle) {
 ///     于是**再也不能写入**
 ///
 /// 曾经用 `window.eval("location.reload()")` 清理，但 `eval` 的可靠性在本项目
-/// 已经栽过三次（快记窗关闭缺陷、悬浮组件通知）。**重建不依赖页面侧任何机制**：
-/// 新窗口 = 新页面 = 状态必然干净，代价只有约 380ms 的 WebView2 初始化。
+/// 已经栽过三次。**重建不依赖页面侧任何机制**：新窗口 = 新页面 = 状态必然干净。
 ///
-/// **380ms 是可接受的**：需求 F-01 的指标是"按下热键到可输入 ≤ 150ms"，
-/// 而那个 150ms 针对的是**已有窗口的复用**；这里是"每次都是首次创建"的口径，
-/// 与实测的 366–434ms 同一量级，仍然远低于 F-15c 的 3 秒端到端预算。
+/// ## 为什么"总是"异步，而不是只在有旧窗口时异步
+///
+/// `destroy()` 把销毁动作**投给主线程的事件循环**，而我们从主线程紧接着
+/// 同步调 `build()` —— 事件循环没机会处理那条消息，旧窗口还在，重建报
+/// `a webview with label 'capture' already exists`。
+///
+/// 更关键的是**调用来源不同、结果也不同**：
+///   · 热键 —— 由外壳自己的回调触发，主线程当时是"空闲"的
+///   · 「＋ 快记」按钮 —— 由主窗口通过 **IPC 命令**触发，**我们正处在处理命令的过程中**
+///
+/// 后者正是用户实测到的："热键呼出没问题，**点按钮呼出的还是会崩溃**"。
+/// 因此这里**无条件**走"后台线程等待 → 回主线程建窗口"，
+/// 两条路径行为一致 —— 不靠"当时主线程忙不忙"这种不可控的判断。
 fn open_capture_window(app: &tauri::AppHandle) {
-    let began = Instant::now();
+    // 重建进行中：忽略这次请求，避免两次重建撞在同一个 label 上
+    if let Some(guard) = app.try_state::<CaptureRebuilding>() {
+        if guard.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            println!("[shell] 快记窗正在重建，忽略这次请求");
+            return;
+        }
+    }
 
-    // 先销毁已有的。
-    //
-    // **必须用 `destroy()` 而不是 `close()`**：
-    //   · `close()` 会先发 `CloseRequested` 事件、是异步的
-    //   · `destroy()` 直接销毁、不发事件
-    //
-    // **而且销毁后必须让出事件循环**：
-    // `destroy()` 是把销毁动作**投给主线程的事件循环**，而我们从主线程
-    // 紧接着同步调 `build()` —— 事件循环没有机会处理那条消息，旧窗口还在，
-    // 于是重建报 `a webview with label 'capture' already exists`。
-    // 实测表现是"**每隔一次**热键快记窗不出来"（✓✗✓✗✓✗）。
-    //
-    // 曾经试图用"失败后 sleep 再重试"绕过 —— **那不可能成功**：
-    // sleep 占着的正是那个必须先返回、销毁才能发生的事件循环。
-    // 正确做法是 `spawn` 一个线程去等，让主线程先回去处理事件。
-    let had_old = app.get_webview_window(CAPTURE_LABEL);
-    if let Some(existing) = &had_old {
-        // 先隐藏：即使销毁要等一小会儿，用户也立刻看不到旧窗口
+    // 先隐藏旧窗口：用户立刻看不到它，不必等销毁完成
+    if let Some(existing) = app.get_webview_window(CAPTURE_LABEL) {
         let _ = existing.hide();
         if let Err(error) = existing.destroy() {
             eprintln!("[shell] ✗ 销毁旧快记窗失败：{error}");
         }
     }
 
-    // 让出事件循环，等销毁真正完成，再回主线程重建。
-    // **只在真有旧窗口时才等**：首次唤起（无旧窗口）立刻建，不必付这份延迟。
-    if had_old.is_some() {
-        let handle = app.clone();
-        let began_ms = began;
-        std::thread::spawn(move || {
-            // 销毁是主线程上的一次事件处理，几十毫秒足够；给宽一点避免偶发失败
-            std::thread::sleep(Duration::from_millis(80));
-            // 回主线程建窗口：Tauri 的窗口 API 必须在主线程调用。
-            // 用 clone 而不是把 `handle` 移进闭包 —— 后者会让外层也被移动，
-            // 编译期就报 "cannot move out of `handle` because it is borrowed"。
-            let for_main = handle.clone();
-            let _ = handle.run_on_main_thread(move || {
-                build_capture_window(&for_main, began_ms);
-            });
-        });
-        return;
-    }
+    let handle = app.clone();
+    let began = Instant::now();
+    std::thread::spawn(move || {
+        // 让出事件循环，等销毁真正完成。
+        // **这个 sleep 是必需的，不是"等一等碰运气"**：销毁是主线程上的一次
+        // 事件处理，而我们正占着主线程 —— 必须先返回，它才可能发生。
+        std::thread::sleep(Duration::from_millis(80));
 
-    build_capture_window(app, began);
+        // 回主线程建窗口：Tauri 的窗口 API 必须在主线程调用
+        let for_main = handle.clone();
+        let result = handle.run_on_main_thread(move || {
+            build_capture_window(&for_main, began);
+            // 无论成败都要放开守卫，否则一次失败会让此后所有唤出都被忽略
+            if let Some(guard) = for_main.try_state::<CaptureRebuilding>() {
+                guard.0.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        if let Err(error) = result {
+            eprintln!("[shell] ✗ 无法回到主线程创建快记窗：{error}");
+            if let Some(guard) = handle.try_state::<CaptureRebuilding>() {
+                guard.0.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    });
 }
 
 /// 真正创建快记窗。单独一个函数，因为"先销毁再建"的路径需要延后调用它。
@@ -1287,6 +1298,8 @@ fn main() {
         .manage(WidgetCommandSlot::new())
         // "主界面该重画了"的标记（悬浮组件改了数据时置位）。
         .manage(MainRefreshRequest(std::sync::atomic::AtomicBool::new(false)))
+        // "正在重建快记窗"的守卫（连按热键/连点按钮时只建一个窗口）。
+        .manage(CaptureRebuilding(std::sync::atomic::AtomicBool::new(false)))
         // 悬浮组件是否为输入态。窗口失焦时要据此决定"收起"还是"什么都不做"。
         .manage(WidgetMode(std::sync::atomic::AtomicBool::new(false)))
         // "窗口动过、位置还没落盘"的标记（拖动时节流用）。
