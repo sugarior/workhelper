@@ -378,10 +378,15 @@ fn collapse_widget(app: tauri::AppHandle) {
 
 /// 页面调用：把悬浮窗当前坐标存进配置。
 ///
-/// **在拖动结束时调用一次**（见 widget.js）：移动过程每秒几十次，
-/// 每次都写文件既无意义又伤盘。
+/// 平时由外壳在窗口移动后自动落盘（见 `app.run` 里的 `Moved` 分支），
+/// 这个命令留给"想立刻保存"的场合（目前页面不调它，但保留作为兜底入口）。
 #[tauri::command]
 fn save_widget_position(app: tauri::AppHandle) {
+    persist_widget_position(&app);
+}
+
+/// 把悬浮窗当前坐标写进配置。移动节流后由定时器调用。
+fn persist_widget_position(app: &tauri::AppHandle) {
     let Some(window) = app.get_webview_window(WIDGET_LABEL) else {
         return;
     };
@@ -392,9 +397,18 @@ fn save_widget_position(app: tauri::AppHandle) {
         return;
     };
     let mut config = state.config.lock().expect("锁被污染");
+    if config.widget_pos == Some((position.x, position.y)) {
+        return;
+    }
     config.widget_pos = Some((position.x, position.y));
     config.save(&state.config_root);
 }
+
+/// "窗口动过、位置还没落盘"的标记。
+///
+/// **为什么要节流**：拖动时 `Moved` 每秒触发几十次，
+/// 每次都写配置文件既无意义又伤盘。置个标记，由后台定时器统一落盘。
+struct WidgetMoveSaver(std::sync::atomic::AtomicBool);
 
 /// 显示或隐藏悬浮组件，并把选择记进配置（托盘菜单用）。
 ///
@@ -1134,6 +1148,8 @@ fn main() {
         .manage(NoteRequest(std::sync::atomic::AtomicBool::new(false)))
         // 悬浮组件是否为输入态。窗口失焦时要据此决定"收起"还是"什么都不做"。
         .manage(WidgetMode(std::sync::atomic::AtomicBool::new(false)))
+        // "窗口动过、位置还没落盘"的标记（拖动时节流用）。
+        .manage(WidgetMoveSaver(std::sync::atomic::AtomicBool::new(false)))
         // 外壳配置（数据目录 + 悬浮组件的位置/透明度/可见性）。
         .manage(ShellState {
             config: std::sync::Mutex::new(config_for_state),
@@ -1159,6 +1175,23 @@ fn main() {
                 eprintln!("[shell] ✗ {error}");
             }
 
+            // 悬浮组件位置的落盘线程。
+            //
+            // 拖动时 `Moved` 每秒触发几十次，逐次写文件既无意义又伤盘。
+            // 因此事件只置标记，这里每 400ms 检查一次并写最终位置 ——
+            // 拖动停手后最多 400ms 就存好，而写盘次数从"几十次/秒"降到"一次/次拖动"。
+            let saver_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(400));
+                let Some(flag) = saver_handle.try_state::<WidgetMoveSaver>() else {
+                    continue;
+                };
+                // swap：只处理"有新位置"的情况，没动过就什么都不做
+                if flag.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    persist_widget_position(&saver_handle);
+                }
+            });
+
             // 这里注册热键；冲突时 give up 并说清怎么办
             //
             // 两个热键分别注册、分别报错：一个被占用不该影响另一个可用，
@@ -1180,25 +1213,46 @@ fn main() {
         .expect("构建 Tauri 应用失败");
 
     app.run(move |app_handle, event| {
-        // 悬浮组件失焦：**只在输入态才收起**。
-        //
-        // 为什么不无条件收起：idle 态的组件本来就不该有焦点（F-17 要求不抢焦点），
-        // 失焦是它的常态，收起它等于组件刚显示就被藏起来。
-        //
-        // 为什么失焦即收起而不是保持展开：用户点了别处说明改主意了，
-        // 让展开态一直挡着屏幕更糟（用户确认过这个取舍）。
-        if let RunEvent::WindowEvent { label, event: WindowEvent::Focused(false), .. } = &event {
+        if let RunEvent::WindowEvent { label, event, .. } = &event {
             if label == WIDGET_LABEL {
-                if let Some(mode) = app_handle.try_state::<WidgetMode>() {
-                    if mode.is_input() {
-                        mode.set(false);
-                        // 页面也要知道 —— 它据此把输入行收起来并清空
-                        if let Some(window) = app_handle.get_webview_window(WIDGET_LABEL) {
-                            let _ = window.eval(
-                                "document.body.classList.remove('mode-input')",
-                            );
+                match event {
+                    // 拖动结束：把新位置写进配置。
+                    //
+                    // **为什么在这里而不是页面里**：拖动由 Tauri 交给操作系统处理，
+                    // 页面侧无法知道"系统级拖动什么时候结束"，
+                    // 在那里猜时机会把位置存成半路的值（实测的直觉：
+                    // 页面 mouseup 往往早于系统拖动结束）。
+                    // `Moved` 是窗口真的移完之后才来的事件。
+                    WindowEvent::Moved(_) => {
+                        // 移动过程会连续触发，因此**节流**：只记"最新位置"，
+                        // 由下面那个定时器统一落盘，避免每秒写几十次文件。
+                        if let Some(state) = app_handle.try_state::<WidgetMoveSaver>() {
+                            state.0.store(true, std::sync::atomic::Ordering::SeqCst);
                         }
                     }
+
+                    // 悬浮组件失焦：**只在输入态才收起**。
+                    //
+                    // 为什么不无条件收起：idle 态的组件本来就不该有焦点
+                    // （F-17 要求不抢焦点），失焦是它的常态，
+                    // 收起它等于组件刚显示就被藏起来。
+                    //
+                    // 为什么失焦即收起而不是保持展开：用户点了别处说明改主意了，
+                    // 让展开态一直挡着屏幕更糟（用户确认过这个取舍）。
+                    WindowEvent::Focused(false) => {
+                        if let Some(mode) = app_handle.try_state::<WidgetMode>() {
+                            if mode.is_input() {
+                                mode.set(false);
+                                // 页面也要知道 —— 它据此把输入行收起来并清空
+                                if let Some(window) = app_handle.get_webview_window(WIDGET_LABEL)
+                                {
+                                    let _ = window
+                                        .eval("document.body.classList.remove('mode-input')");
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }

@@ -261,7 +261,6 @@ textarea.log-body { width: 100%; min-height: 190px; resize: vertical; font-famil
 
    窗口尺寸是固定的（展开态尺寸），**形态切换只改 CSS 类**，
    不改窗口尺寸 —— 后者要走外壳，对高频动作太慢。 */
-
 body.widget {
   /* 面板透明度：**只有外壳一个来源**（通过 URL 参数 → 内联样式写在根元素上）。
      这里刻意**不写默认值** —— 写了就会在本元素上重新定义变量、
@@ -332,7 +331,10 @@ body.has-focus .widget-task { font-weight: 600; }
   border-radius: 5px;
   background: transparent;
   color: #9aa0a6;
-  font-size: 12px;
+  /* V 形展开符号：用字符会比画 SVG 简单，也不需要额外请求。
+     字号调大让它看起来像箭头而不是逗号。 */
+  font-size: 15px;
+  line-height: 1;
   cursor: pointer;
 }
 .widget-btn:hover { background: rgba(255, 255, 255, 0.16); color: #fff; }
@@ -352,7 +354,11 @@ body.has-focus .widget-task { font-weight: 600; }
 }
 body.mode-input .widget-input-row { display: flex; }
 
-/* 展开态不需要收起按钮（那会与"记下"混淆）——收起用 Esc 或点别处 */
+/* 输入态时把小条里的文字与按钮收起来：
+   目标已经写进输入框的 placeholder，再显示一遍是重复；
+   而小条空着会让展开的面板看起来有两层。 */
+body.mode-input .widget-task,
+body.mode-input .widget-counts,
 body.mode-input .widget-btn { display: none; }
 
 .widget-target {

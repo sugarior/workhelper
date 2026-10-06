@@ -7,22 +7,27 @@
   <!-- 复用同一份 app.css（里面已有 `.widget-*` 段）。
        不另开一个 widget.css：两个样式表会各自定义变量与基础规则，
        迟早出现"同一处在两处定义"的背离。 -->
-  <link rel="stylesheet" href="/app.css?v=0.17.0">
+  <link rel="stylesheet" href="/app.css?v=0.18.0">
 </head>
 <body class="widget">
   <!-- 悬浮小组件（需求 F-17）。
        两个形态共用一个窗口，窗口尺寸固定 = 展开态尺寸：
-         · idle  —— 只有一条细栏，外面用 `drag` 区域接住鼠标以便拖动
+         · idle  —— 一条细栏
          · input —— Ctrl+Shift+Space 唤出的「记一笔」输入态（F-15c）
 
        **为什么窗口尺寸固定**：改窗口尺寸要走外壳，而形态切换是高频动作。
        固定尺寸后切换只改 CSS 类，瞬时完成，也不用每次重算位置。 -->
 
-  <!-- 拖动区：idle 时就是那条细栏本身，input 时退化为顶部的标题行。
-       用 Tauri 的拖动区比自己做"鼠标按下 → 移动窗口"可靠（不会抖、不会丢鼠标）。 -->
-  <div class="widget-bar" id="bar" data-tauri-drag-region>
+  <!-- 拖动区用 `deep`（而不是裸属性）。
+       裸属性在 Tauri 里的语义是"**只有直接点在这个元素上**才拖动"，
+       而这条栏几乎被文字填满 —— 用户点到的是子元素，于是完全拖不动。
+       `deep` 让子树内任意位置都能拖动。
+
+       可点元素（按钮/输入框）默认就阻止拖动，因此按钮不需要额外处理；
+       但两个数字标签要显式排除 —— 它们看着不是按钮，拖到它们身上却应该能拖。 -->
+  <div class="widget-bar" id="bar" data-tauri-drag-region="deep">
     <span class="widget-dot" id="dot"></span>
-    <span class="widget-task" id="task" data-tauri-drag-region>加载中…</span>
+    <span class="widget-task" id="task">加载中…</span>
 
     <!-- idle 时显示的数字：今日未结束 / 收件箱未处理（F-17 指定的两条） -->
     <span class="widget-counts" id="counts">
@@ -30,24 +35,28 @@
       <span class="widget-count" id="count-inbox" title="收件箱未处理">–</span>
     </span>
 
-    <button class="widget-btn" id="collapse" title="收起（Esc）" aria-label="收起">✕</button>
+    <!-- 展开按钮：idle 时把组件变成「记一笔」输入态。
+         与热键是同一个动作的**同一入口**（都调 enterInputMode），
+         只是鼠标与键盘两条路 —— 因此不是两套功能。 -->
+    <button class="widget-btn" id="expand" title="记一笔（Ctrl+Shift+Space）" aria-label="展开">⌄</button>
   </div>
 
-  <!-- 输入态：只在这一态可见（F-15c 要求顶部显示"记到：…"） -->
+  <!-- 输入态：只在这一态可见。
+       **不放"记到：…"标签** —— 目标任务已经写在输入框的 placeholder 里，
+       既省下一行空间给输入，也让写入内容有更长的可见范围（用户要求）。 -->
   <div class="widget-input-row" id="inputRow">
-    <span class="widget-target" id="target"></span>
     <select class="widget-kind" id="kind" aria-label="类型">
       <option value="progress">进展</option>
       <option value="blocker">卡点</option>
       <option value="decision">决定</option>
       <option value="abort">中止</option>
     </select>
-    <input class="widget-note" id="note" type="text" placeholder="刚才这件事有什么进展？（Enter 提交）">
+    <input class="widget-note" id="note" type="text" placeholder="记一笔…">
     <button class="widget-save" id="save">记下</button>
   </div>
 
   <div class="widget-error" id="error"></div>
 
-  <script type="module" src="/widget.js?v=0.17.0"></script>
+  <script type="module" src="/widget.js?v=0.18.0"></script>
 </body>
 </html>

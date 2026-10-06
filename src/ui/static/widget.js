@@ -12,12 +12,12 @@ import { api } from '/api.js';
 const taskLabel = document.getElementById('task');
 const countToday = document.getElementById('count-today');
 const countInbox = document.getElementById('count-inbox');
-const collapseButton = document.getElementById('collapse');
-const targetLabel = document.getElementById('target');
-const kindSelect = document.getElementById('kind');
+const expandButton = document.getElementById('expand');
 const noteInput = document.getElementById('note');
 const saveButton = document.getElementById('save');
 const errorBox = document.getElementById('error');
+
+const kindSelect = document.getElementById('kind');
 
 /** 当前是否有焦点任务。没有就不能记一笔 —— 目标由焦点决定（F-15c）。 */
 let hasFocus = false;
@@ -51,7 +51,9 @@ async function refresh() {
     // F-17 指定的两条数字：今日未结束 + 收件箱未处理
     setCount(countToday, today.counts.open);
     setCount(countInbox, today.inboxCount);
-    targetLabel.textContent = hasFocus ? `记到：${focus.title}` : '';
+    // 目标写进 placeholder，而不是单独一行"记到：…"
+    // —— 省下的空间给输入内容，写入时能看到更长的预览（用户要求）。
+    noteInput.placeholder = hasFocus ? `记到「${focus.title}」…` : '记一笔…';
   } catch {
     // 内核还没起来（应用刚启动）时会走到这里。**不显示错误** ——
     // 那不是用户的错，也没有他能做的事；显示"加载失败"只会让人以为坏了。
@@ -181,29 +183,13 @@ noteInput.addEventListener('keydown', (event) => {
 
 saveButton.addEventListener('click', () => void submit());
 
-collapseButton.addEventListener('click', () => {
-  void (async () => {
-    if (internals?.invoke) await internals.invoke('collapse_widget').catch(() => {});
-  })();
-});
+// 展开按钮：把小条变成输入态。
+// 与热键走**同一个函数**，因此不存在"鼠标点了与键盘按了行为不一致"的可能。
+expandButton.addEventListener('click', () => enterInputMode());
 
-/**
- * 拖动结束后把位置报给外壳保存。
- *
- * **为什么在这里报而不是在移动过程中**：移动过程每秒几十次，
- * 每次都写配置文件既无意义又伤盘。松手时一次就够。
- * 位置本身由外壳通过 `data-tauri-drag-region` 处理，页面只管"拖完了"这个时点。
- */
-document.addEventListener('mouseup', () => {
-  void (async () => {
-    if (!internals?.invoke) return;
-    try {
-      await internals.invoke('save_widget_position');
-    } catch {
-      // 存不住最多是下次回到默认位置，不值得打扰用户
-    }
-  })();
-});
-
+// 说明：**拖动与位置保存不在这里**。
+// 拖动由 Tauri 的 `data-tauri-drag-region="deep"` 交给操作系统处理，
+// 位置由外壳监听窗口移动事件后写进配置 —— 页面侧无法知道
+// "系统级拖动什么时候结束"，在那里猜时机会把位置存成半路的值。
 void refresh();
 startPolling();
