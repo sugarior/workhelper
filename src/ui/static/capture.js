@@ -83,17 +83,6 @@ function showError(message) {
   errorBox.style.color = '';
 }
 
-/**
- * 空输入的就地提示。
- *
- * 与 showError 分开，是因为**它不该被当成错误重置**：用户还没开始写，
- * 这不是"保存失败"，只是一句提示。用中性色，避免一按回车就满屏红字。
- */
-function showEmptyHint() {
-  errorBox.textContent = '没有可记的内容 —— 写点什么再保存，或按 Esc 关掉。';
-  errorBox.style.color = 'var(--text-dim)';
-}
-
 /** 保存成功后收起窗口。浏览器里能关就关；关不掉则退化成一次性提示。 */
 function closeWindow() {
   document.body.classList.add('closing');
@@ -118,16 +107,21 @@ async function save() {
   errorBox.textContent = '';
 
   /**
-   * 空输入就地提示，不发请求、不关窗。
+   * 空输入时 `Enter` = **关闭**，而不是"拦住并要用户改用 Esc"。
    *
-   * 服务层也有同样的守卫（`quickCapture` 抛校验错），这里是**顺手挡一下**：
-   * 让用户看到一句人话，而不是把请求打出去再显示一条接口错误。
-   * 两层都要有 —— 界面挡的是"这次操作"，服务层挡的是"坏数据不可产生"
-   * （CLI 也直接调服务，因此同样受保护）。
+   * 依据 §6.2「**永远不强迫我在记录时做决定**」：要求记住"空的时候要用 Esc"
+   * 就是一个额外的决定与记忆负担，而它换不来任何东西 —— 框里本来什么都没有。
+   *
+   * 不丢内容：这里判断的是**真的一条内容都没有**，
+   * 有内容（哪怕两端带空白、或手滑多按了回车）一律照存。
+   *
+   * 服务层仍有同样的守卫（`quickCapture` 抛校验错）：
+   * 界面这一层是"顺手挡一下"，服务层那一层是"坏数据不可产生"（CLI 也走服务）。
+   * 只是界面这里不再把它当成需要用户解决的问题，而是直接收起窗口。
    */
   if (text.trim().length === 0) {
-    showEmptyHint();
-    textarea.focus();
+    finished = true;
+    closeWindow();
     return;
   }
 

@@ -6,7 +6,7 @@
   <title>快记 · WorkHelper</title>
   <!-- 样式与脚本都带版本参数：**缓存失效必须覆盖所有静态资源**。
        此前只有 capture.js 带版本，于是改了 CSS 之后 WebView 仍用旧样式。 -->
-  <link rel="stylesheet" href="/app.css?v=0.14.0">
+  <link rel="stylesheet" href="/app.css?v=0.15.0">
 </head>
 <body class="capture">
   <!-- 标题栏。Windows 弹窗的形态标志不是"角落里有个关闭按钮"，
@@ -21,8 +21,11 @@
   </div>
 
   <div class="capture-card">
+    <!-- 提示文字里不再写"Esc 取消"：
+         空框时 Enter 就是关闭（依据 §6.2 不强迫用户做决定），
+         Esc 仍可用但不需要在提示里教 —— 提示只留真正需要记的两件事。 -->
     <textarea id="text" class="capture-input" autofocus
-      placeholder="记一条到收件箱…（Enter 保存，Shift+Enter 换行，Esc 取消）"></textarea>
+      placeholder="记一条到收件箱…（Enter 保存，Shift+Enter 换行）"></textarea>
 
     <!-- 这里曾有一组芯片（收件箱 / 资料），已删除。原因值得记下：
          它承诺的事做不到 ——
@@ -39,11 +42,11 @@
 
     <div class="capture-actions">
       <button class="primary" id="save">保存</button>
-      <span class="hint" id="tips">Enter 保存 · Shift+Enter 换行 · Esc 取消</span>
+      <span class="hint" id="tips">Enter 保存 · Shift+Enter 换行 · 空着按 Enter 直接关掉</span>
     </div>
     <div class="error-line" id="error"></div>
   </div>
 
-  <script type="module" src="/capture.js?v=0.14.0"></script>
+  <script type="module" src="/capture.js?v=0.15.0"></script>
 </body>
 </html>
