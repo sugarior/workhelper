@@ -630,6 +630,13 @@ body.widget .widget-note::placeholder { color: #7b8188; }
 }
 body.mode-pick .widget-pick { display: block; }
 
+/* 输入态与选焦点态**互斥显示**。
+   两者叠在一起要 237px，而窗口只有 260px（加上提示行与下边距就**溢出被切**）。
+   与其把窗口加高（那会让 idle 时多出一大片空白），不如让它们轮流出场 ——
+   用户一次只做一件事，而"写了一半想改目标"由 widget.js 的草稿暂存兜住。 */
+body.mode-pick .widget-input-row { display: none; }
+body.mode-pick .widget-error { min-height: 0; }
+
 .widget-pick-title {
   display: flex;
   align-items: baseline;
@@ -645,8 +652,10 @@ body.mode-pick .widget-pick { display: block; }
   margin: 0;
   padding: 0;
   list-style: none;
-  /* 最多显示 5 项，多出来的滚动 —— 与 WIDGET_PICK_MAX 呼应 */
-  max-height: 150px;
+  /* 最多显示 5 项，多出来的滚动。
+     与窗口高度配套：小条 44 + 面板约 141 + 提示行约 19 ≈ 204，
+     窗口 260 留有余量。**再加高列表就会把提示行切掉**（实测踩到）。 */
+  max-height: 130px;
   overflow-y: auto;
 }
 

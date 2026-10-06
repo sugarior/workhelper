@@ -73,12 +73,23 @@ function showError(message, ok = false) {
   errorBox.classList.toggle('ok', ok);
 }
 
+/**
+ * 「写了一半的内容」暂存。
+ *
+ * **为什么需要**：输入态里点任务名去切换焦点时，输入行会被选焦点面板顶掉
+ * （两者不能同时显示，理由见 `enterPickMode`）。若不暂存，用户写了一半的字
+ * 就在切焦点的过程中消失了 —— 那是**静默丢数据**，比列表被切掉严重得多。
+ */
+let draftNote = '';
+
 /** 切成输入态：清空上次的内容、聚焦输入框。 */
 export function enterInputMode() {
   busy = false;
   noteInput.value = '';
+  draftNote = '';
   showError('');
   document.body.classList.add('mode-input');
+  document.body.classList.remove('mode-pick');
   // 聚焦必须在移除 display:none 之后 —— 不可见元素无法获得焦点
   noteInput.focus();
   if (!hasFocus) {
@@ -90,6 +101,7 @@ export function enterInputMode() {
 export function exitInputMode() {
   document.body.classList.remove('mode-input');
   noteInput.value = '';
+  draftNote = '';
   showError('');
 }
 
@@ -102,14 +114,22 @@ let candidateIndex = 0;
 /**
  * 进入"选一个焦点"模式。
  *
- * **两个入口都走这里**（用户要求）：
+ * **三个入口都走这里**：
  *   · 按热键时**还没有**焦点任务 —— 把缺的那一步补上
- *   · **点击小条上的任务名** —— 随时换一件（原来只能在无焦点时才能换）
+ *   · **点击小条上的任务名** —— 随时换一件
+ *   · **输入态里点任务名** —— 写了一半发现记错了目标
  *
- * **先显示再填内容**（用户反馈"很卡"）：
- * 原来是 `await loadCandidates()` 之后才把面板显示出来 —— 打开前要等一次
- * 网络往返，而点击/按键本来就要求即时反馈。现在立刻显示"读取中…"，
- * 列表到了再替换。
+ * **它和输入态互斥显示**（用户实测反馈"展开记一笔时还能切换焦点，但框不全"）：
+ * 两者叠在一起要 237px，而窗口只有 260px，加上提示行就**溢出被切**。
+ * 与其把窗口加高（那会让 idle 时多出一大片空白），不如让它们轮流出场 ——
+ * 反正用户一次只做一件事。
+ *
+ * 输入态进来时会把已写的内容暂存进 `draftNote`，选完焦点再填回去，
+ * **不丢用户写了一半的字**。
+ *
+ * **先显示再填内容**（用户反馈"很卡"）：原来是 `await loadCandidates()`
+ * 之后才把面板显示出来 —— 打开前要等一次网络往返，而点击/按键本来就要求
+ * 即时反馈。现在立刻显示"读取中…"，列表到了再替换。
  *
  * 候选数据来自 `focusCandidates()` —— **与主界面聚焦条的下拉同一份**
  * （同一个服务方法、同一个口径：排入今日 + 截止日已到 + 当前焦点例外）。
@@ -118,6 +138,16 @@ let candidateIndex = 0;
 function enterPickMode() {
   candidates = [];
   candidateIndex = 0;
+
+  // 记下"进来之前是不是在写"：决定选完之后回哪儿
+  const fromInput = document.body.classList.contains('mode-input');
+
+  // 从输入态切过来时暂存草稿，并收起输入行 —— 两者不能同时显示（见函数注释）
+  if (fromInput) {
+    draftNote = noteInput.value;
+    document.body.classList.remove('mode-input');
+  }
+
   // 立刻切形态：这一帧就可见，不等网络
   document.body.classList.add('mode-pick');
   mount(pickList, [el('li', { class: 'pick-item pick-loading' }, '读取中…')]);
@@ -129,6 +159,8 @@ function enterPickMode() {
     if (!document.body.classList.contains('mode-pick')) return;
     if (list.length === 0) {
       exitPickMode();
+      // 从输入态来的就回输入态，别把用户丢在 idle 里
+      if (fromInput) restoreInputMode();
       showError('没有可聚焦的任务 —— 先去主界面建一条，或把它排入今日');
       return;
     }
@@ -142,10 +174,26 @@ function enterPickMode() {
   })();
 }
 
-function exitPickMode() {
+/** 回到输入态并填回草稿（"进来之前在写"的情况）。 */
+function restoreInputMode() {
+  document.body.classList.add('mode-input');
+  noteInput.value = draftNote;
+  noteInput.focus();
+}
+
+/**
+ * 退出选焦点态。
+ *
+ * **`restoreIfDraft` 决定要不要回到输入态**：
+ *   · `true`（默认，用户主动取消时）—— 若进来之前有草稿，就回到输入态并填回它。
+ *     否则"写了一半 → 点任务名 → 又点别处"这条路会把草稿**静默丢掉**。
+ *   · `false` —— 用在"已经选好了"和"换完目标"的路径上，那里由调用方决定下一步。
+ */
+function exitPickMode(restoreIfDraft = true) {
   document.body.classList.remove('mode-pick');
   candidates = [];
   candidateIndex = 0;
+  if (restoreIfDraft && draftNote.length > 0) restoreInputMode();
 }
 
 function renderCandidates() {
@@ -175,14 +223,24 @@ async function loadCandidates() {
  *
  * 用户按热键的本意是"记一笔"，选任务只是补上缺的那一步 ——
  * 因此不该让人再按一次热键才能开始写。
+ *
+ * **如果是从输入态切过来的，草稿要填回去**：用户写了一半才发现记错了目标，
+ * 换完目标应当继续写，而不是从头再来。
  */
 async function confirmPick(index) {
   const item = candidates[index];
   if (item === undefined) return;
-  exitPickMode();
+  // 先记下草稿再退出选焦点态。
+  // **传 `false`**：下面由本函数决定回哪儿（并填回原草稿）——
+  // 若让 exitPickMode 自己恢复，就会先用旧草稿打开输入态、再被这里覆盖一次。
+  const draft = draftNote;
+  exitPickMode(false);
   try {
     await api.focusTask(item.id);
   } catch (error) {
+    // 失败也要让用户回到能写的地方，而不是停在关掉的面板前
+    draftNote = draft;
+    restoreInputMode();
     showError(`聚焦失败：${error.message}`);
     return;
   }
@@ -190,7 +248,11 @@ async function confirmPick(index) {
   // **让主界面也知道焦点变了**（用户实测报告："选完焦点在主页面不同步"）：
   // 主界面顶部的聚焦条显示的是同一个焦点，不同步就会两处不一致。
   void invokeShell('notify_main_refresh');
-  enterInputMode();
+
+  // 复用 restoreInputMode 而不是 enterInputMode：后者会清空输入框，
+  // 把刚才暂存的草稿冲掉 —— 而那正是这个函数要保住的东西。
+  draftNote = draft;
+  restoreInputMode();
 }
 
 // ---------- 提交 ----------
