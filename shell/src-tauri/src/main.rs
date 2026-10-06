@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 // `Manager` 提供 `AppHandle::state()` —— 少了它编译不过，
 // 而编译器的提示很明确（"trait Manager which provides state is implemented but not in scope"）
-use tauri::{Manager, RunEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 
 /// 内核服务端口。与 `src/ui/main.ts` 的默认值一致；这里显式传入，避免两边默认值漂移。
 const PORT: u16 = 7317;
@@ -315,39 +315,19 @@ fn open_capture_window(app: &tauri::AppHandle) {
         Err(error) => eprintln!("[shell] ✗ 创建快记窗失败：{error}"),
     }
 }
-/// 全局热键「记一笔」：把主窗口带到前面，并**置一个"待处理"标记**等页面来取。
+/// 全局热键「记一笔」（需求 F-15c + §4.8）。
 ///
-/// **为什么不开小窗**：记一笔记到**当前焦点任务**，目标已经由焦点决定了；
-/// 再开一个窗只是把同一套 UI 复制一份。需求 F-15c 明确"顶部常驻条也提供同一入口
-/// （同一个动作的两个位置，不是两套功能）"，因此这里复用焦点条。
+/// **改为唤出悬浮组件的输入态**，不再把主窗口带到前面。
+/// 原因是主窗口迟早要常驻托盘，届时"记一笔却要先打开整个软件"就很别扭 ——
+/// 而记一笔的本意是"不离开当前工作就能记一句"。
 ///
 /// **为什么用"标记 + 页面轮询"而不是事件**：
 /// 页面侧唯一被实测证明可靠的能力是 `invoke`（命令调用）；事件插件在
 /// `__TAURI_INTERNALS__` 上的调用形态没有验证过，而本项目已经因为"没验证就下手"
 /// 在快记窗上耗过很久。标记 + 轮询只用到 `invoke` 这一条路，行为可预期。
-/// 页面在窗口获得焦点后才轮询，因此空转极少（每 200ms 一次本地命令调用）。
-///
-/// 需求 F-15c 的"从按键到记完 ≤ 3 秒"里，这个轮询最多贡献 200ms 延迟 ——
-/// 而窗口置前本身就要几百毫秒，用户感受不到差别。
+/// 轮询每 150ms 一次本地命令调用，代价可以忽略。
 fn request_note_input(app: &tauri::AppHandle) {
-    use tauri::Manager;
-
-    let Some(window) = app.get_webview_window("main") else {
-        eprintln!("[shell] ✗ 找不到主窗口，无法记一笔");
-        return;
-    };
-
-    // 置标记。页面取走时清零（见 take_note_request）。
-    match app.try_state::<NoteRequest>() {
-        Some(state) => state.0.store(true, std::sync::atomic::Ordering::SeqCst),
-        // 状态没注册是内部错误（`.manage` 漏了），必须说出来而不是静默无反应
-        None => eprintln!("[shell] ✗ 记一笔：NoteRequest 状态未注册（内部错误）"),
-    }
-
-    // 先让窗口可见并置前：窗口可能被最小化或藏在别的程序后面
-    let _ = window.show();
-    let _ = window.unminimize();
-    let _ = window.set_focus();
+    focus_widget_input(app);
 }
 
 /// 「记一笔」热键被按下、等着页面来取。
@@ -379,8 +359,215 @@ fn report_note_result(accepted: bool) {
     }
 }
 
+/// 悬浮小组件的窗口标签。
+const WIDGET_LABEL: &str = "widget";
+
 /// 应用名，用于 `%APPDATA%` 下的目录名与配置文件位置。
 const APP_DIR_NAME: &str = "WorkHelper";
+
+/// 页面调用：收起悬浮组件的输入态（Esc 或点 ✕）。
+///
+/// 只收起输入态、**不隐藏窗口** —— 组件是常驻的（F-17）。
+/// "从托盘隐藏"是另一件事，见 `set_widget_visible`。
+#[tauri::command]
+fn collapse_widget(app: tauri::AppHandle) {
+    if let Some(mode) = app.try_state::<WidgetMode>() {
+        mode.set(false);
+    }
+}
+
+/// 页面调用：把悬浮窗当前坐标存进配置。
+///
+/// **在拖动结束时调用一次**（见 widget.js）：移动过程每秒几十次，
+/// 每次都写文件既无意义又伤盘。
+#[tauri::command]
+fn save_widget_position(app: tauri::AppHandle) {
+    let Some(window) = app.get_webview_window(WIDGET_LABEL) else {
+        return;
+    };
+    let Ok(position) = window.outer_position() else {
+        return;
+    };
+    let Some(state) = app.try_state::<ShellState>() else {
+        return;
+    };
+    let mut config = state.config.lock().expect("锁被污染");
+    config.widget_pos = Some((position.x, position.y));
+    config.save(&state.config_root);
+}
+
+/// 显示或隐藏悬浮组件，并把选择记进配置（托盘菜单用）。
+///
+/// **隐藏只是不常驻显示**：热键仍然能唤出输入态（用户确认过）——
+/// 否则用户藏起组件后就再也找不到记一笔的入口。
+fn set_widget_visible(app: &tauri::AppHandle, visible: bool) {
+    use tauri::Manager;
+
+    if let Some(state) = app.try_state::<ShellState>() {
+        let mut config = state.config.lock().expect("锁被污染");
+        config.widget_visible = visible;
+        config.save(&state.config_root);
+    }
+
+    let window = match app.get_webview_window(WIDGET_LABEL) {
+        Some(window) => window,
+        None => {
+            // 隐藏状态下窗口可能还没建过；只有要显示时才值得建
+            if !visible {
+                return;
+            }
+            match create_widget_window(app) {
+                Ok(window) => window,
+                Err(message) => {
+                    eprintln!("[shell] ✗ {message}");
+                    return;
+                }
+            }
+        }
+    };
+
+    if visible {
+        let _ = window.show();
+        println!("[shell] 悬浮组件：显示");
+    } else {
+        let _ = window.hide();
+        println!("[shell] 悬浮组件：隐藏（热键仍可唤出输入态）");
+    }
+}
+
+/// 悬浮窗尺寸。
+///
+/// **固定不随形态变化**：idle（细栏）与 input（展开）用同一个窗口尺寸，
+/// 切换只改 CSS 类，**不改窗口尺寸** —— 后者要走外壳，对高频动作太慢，
+/// 而且每次都要重算位置（放大时该往哪边扩？）。
+/// 代价是 idle 时窗口下方有一片透明区域 —— 因为根元素透明、且
+/// 那条细栏在最上方，视觉上就是"只有一条细栏"。
+const WIDGET_W: f64 = 360.0;
+const WIDGET_H: f64 = 104.0;
+
+/// 距屏幕边缘的默认留白（首次运行、尚未拖过时把组件放在右下角）。
+const WIDGET_MARGIN: f64 = 24.0;
+
+/// 悬浮窗是否处于「记一笔」输入态。
+///
+/// 外壳需要知道它，因为"窗口失焦"要分情况处理：
+/// 输入态失焦 → 收起回 idle；idle 失焦 → 什么都不做（组件本来就不该抢焦点）。
+struct WidgetMode(std::sync::atomic::AtomicBool);
+
+impl WidgetMode {
+    fn is_input(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn set(&self, input: bool) {
+        self.0.store(input, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 外壳运行时路径与配置（`Arc` 共享：窗口事件回调里也要能改配置并保存）。
+struct ShellState {
+    config: std::sync::Mutex<ShellConfig>,
+    config_root: PathBuf,
+}
+
+/// 创建悬浮小组件窗（需求 F-17）。
+///
+/// **默认常驻显示**（用户确认），位置取上次拖动保存的坐标；
+/// 首次运行放在屏幕右下角。
+///
+/// 关键窗口属性：
+///   · `decorations(false)` —— 便签形态，没有标题栏
+///   · `always_on_top(true)` —— 需求要求"置顶显示"
+///   · `skip_taskbar(true)` —— 不该在任务栏占一格（那是主窗口的位置）
+///   · `transparent(true)` —— 圆角之外要真的是桌面，而不是一块窗口底色
+///   · `focused(false)` —— **绝不主动抢焦点**（F-17 的硬要求）
+fn create_widget_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+    let (opacity, saved_pos, visible) = {
+        let state = app.state::<ShellState>();
+        let config = state.config.lock().expect("锁被污染");
+        (config.widget_opacity, config.widget_pos, config.widget_visible)
+    };
+
+    let mut builder = tauri::WebviewWindowBuilder::new(
+        app,
+        WIDGET_LABEL,
+        // 不透明度通过 **URL 参数**交给页面，由 CSS 变量生效。
+        //
+        // **为什么不用窗口级的 `set_opacity`**：Tauri 2 的 `WebviewWindow`
+        // 没有这个方法（窗口整体透明度依赖分层窗口，跨平台不可用，实测确认）。
+        // 而组件的背景本来就是半透明的（`rgba(...)` + 背景模糊），
+        // 用 CSS 变量调它反而更自然：**只影响面板本身，不影响里面的文字**——
+        // 窗口级透明度会把文字一起变淡，小字会糊得看不清。
+        tauri::WebviewUrl::App(format!("widget.html?opacity={opacity}").into()),
+    )
+    .title("悬浮组件")
+    .inner_size(WIDGET_W, WIDGET_H)
+    .decorations(false)
+    .always_on_top(true)
+    .resizable(false)
+    .skip_taskbar(true)
+    .transparent(true)
+    .shadow(false)
+    // 不抢焦点：组件是背景，用户没点它就不该拿走谁的焦点
+    .focused(false)
+    .visible(false); // 先建好再定位，避免在默认位置闪一下
+
+    // 有保存过的位置就用它，否则右下角
+    if let Some((x, y)) = saved_pos {
+        builder = builder.position(x as f64, y as f64);
+    } else if let Some(monitor) = app.primary_monitor().ok().flatten() {
+        let size = monitor.size();
+        let scale = monitor.scale_factor();
+        let logical_w = size.width as f64 / scale;
+        let logical_h = size.height as f64 / scale;
+        builder = builder.position(
+            logical_w - WIDGET_W - WIDGET_MARGIN,
+            logical_h - WIDGET_H - WIDGET_MARGIN - 48.0, // 再抬一点，避开任务栏
+        );
+    }
+
+    let window = builder.build().map_err(|e| format!("创建悬浮组件失败：{e}"))?;
+    if visible {
+        let _ = window.show();
+    }
+    Ok(window)
+}
+
+/// 让悬浮组件进入「记一笔」输入态并获取焦点。
+///
+/// **只有用户按下热键才会走到这里** —— 组件自己从不主动抢焦点（F-17）。
+/// 因此这个函数里的 `set_focus` 是"响应用户意图"，不是"抢"。
+fn focus_widget_input(app: &tauri::AppHandle) {
+    let window = match app.get_webview_window(WIDGET_LABEL) {
+        Some(window) => window,
+        None => match create_widget_window(app) {
+            Ok(window) => window,
+            Err(message) => {
+                eprintln!("[shell] ✗ {message}");
+                return;
+            }
+        },
+    };
+
+    if let Some(state) = app.try_state::<ShellState>() {
+        if let Some(mode) = app.try_state::<WidgetMode>() {
+            mode.set(true);
+        }
+        let _ = &state;
+    }
+
+    // 置标记：页面轮询取走后进入输入态。
+    // 复用「记一笔」那一套（take_note_request），因此主窗口与悬浮组件
+    // **共用同一条通路**，不新增第二种通知方式。
+    if let Some(state) = app.try_state::<NoteRequest>() {
+        state.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    // 隐藏状态下也要能唤出（用户确认）：否则藏起来后记一笔就没入口了
+    let _ = window.show();
+    // `focused(false)` 建出来的窗口不会自己抢焦点，这里显式给 —— 用户按了热键
+    let _ = window.set_focus();
+    println!("[shell] 记一笔：悬浮组件已进入输入态");
+}
 
 /// 内存中的运行时路径解析结果。
 struct RuntimePaths {
@@ -392,6 +579,10 @@ struct RuntimePaths {
     data_dir: PathBuf,
     /// 开发态还是打包态
     dev: bool,
+    /// 配置文件所在目录（`%APPDATA%\WorkHelper`）。保存悬浮组件状态时要用
+    config_root: PathBuf,
+    /// 读到的外壳配置。`main` 会把它交给 Tauri 状态，之后由 `ShellState` 持有
+    config: ShellConfig,
 }
 
 /// 判断是开发态还是打包态。
@@ -433,32 +624,340 @@ fn app_data_root() -> Result<PathBuf, String> {
         .map_err(|_| "既取不到 APPDATA 也取不到用户主目录".to_string())
 }
 
-/// 读取配置文件里的数据目录覆盖值。
+/// 外壳自己的配置：`%APPDATA%\WorkHelper\config.json`。
 ///
-/// **为什么配置放在 `%APPDATA%` 而不是数据目录里**：数据目录本身是可被改的，
-/// 把"数据目录在哪"记在数据目录里就成了循环依赖 —— 改完下次就找不到配置了。
+/// **为什么这些不进内核的 `settings` 表**：
+///   · `dataDir` 决定了内核的库在哪，**内核启动前就要知道**，不能反过来问内核
+///   · 悬浮组件的位置/透明度是"**这台机器的窗口状态**"，属于外壳职责；
+///     放进库会跟着备份/同步跑到别的机器上，而那里的屏幕布局根本不同
 ///
-/// **为什么放在 `%APPDATA%` 而不是程序目录旁**：程序目录可能不可写（安装在
-/// `Program Files`），而"我想改数据目录"这件事**恰恰可能就是因为程序目录不可写**。
+/// 于是配置只有一处：这个文件。**不设第二个地方存同样的东西** ——
+/// 那正是本项目第一类错误（同一规则写在两处必然背离）。
+#[derive(Debug, Clone)]
+struct ShellConfig {
+    /// 数据目录覆盖值（未设则按形态取默认）
+    data_dir: Option<PathBuf>,
+    /// 悬浮组件左上角坐标（未设则首次运行时定位到屏幕右下角）
+    widget_pos: Option<(i32, i32)>,
+    /// 悬浮组件不透明度 0.3–1.0
+    widget_opacity: f64,
+    /// 悬浮组件是否常驻显示（托盘可关）
+    widget_visible: bool,
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            data_dir: None,
+            widget_pos: None,
+            widget_opacity: 0.92,
+            // 需求 F-17：默认常驻显示（托盘菜单可关闭）
+            widget_visible: true,
+        }
+    }
+}
+
+impl ShellConfig {
+    fn load(root: &Path) -> Self {
+        let mut config = Self::default();
+        // 读不到或解析失败就用默认值：**一个坏掉的配置文件不该让程序完全起不来**。
+        // 但损坏本身要说出来，否则用户改错了配置只会觉得"设置不生效"。
+        let path = root.join("config.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return config;
+        };
+        let Ok(json) = Json::parse(&text) else {
+            eprintln!("[shell] ✗ 配置文件解析失败，已按默认值继续：{}", path.display());
+            return config;
+        };
+
+        if let Some(value) = json.get("dataDir").and_then(Json::as_str) {
+            if !value.trim().is_empty() {
+                config.data_dir = Some(PathBuf::from(value));
+            }
+        }
+        if let Some(value) = json.get("widgetOpacity").and_then(Json::as_f64) {
+            // 夹到可用区间：0 会让组件完全看不见，用户以为是 bug
+            config.widget_opacity = value.clamp(0.3, 1.0);
+        }
+        if let Some(value) = json.get("widgetVisible").and_then(Json::as_bool) {
+            config.widget_visible = value;
+        }
+        let x = json.get("widgetX").and_then(Json::as_i64);
+        let y = json.get("widgetY").and_then(Json::as_i64);
+        if let (Some(x), Some(y)) = (x, y) {
+            config.widget_pos = Some((x as i32, y as i32));
+        }
+        config
+    }
+
+    /// 写回配置文件。
+    ///
+    /// **失败只提示不中断**：位置记不住最多是下次回到默认位置，
+    /// 而为此让"移动悬浮组件"这个操作报错，代价更大。
+    fn save(&self, root: &Path) {
+        let mut out = String::from("{\n");
+        out.push_str(&format!(
+            "  \"dataDir\": {},\n",
+            match &self.data_dir {
+                Some(path) => json_string(&path.to_string_lossy()),
+                None => "null".to_string(),
+            }
+        ));
+        match self.widget_pos {
+            Some((x, y)) => out.push_str(&format!("  \"widgetX\": {x},\n  \"widgetY\": {y},\n")),
+            None => out.push_str("  \"widgetX\": null,\n  \"widgetY\": null,\n"),
+        }
+        out.push_str(&format!("  \"widgetOpacity\": {},\n", self.widget_opacity));
+        out.push_str(&format!("  \"widgetVisible\": {}\n", self.widget_visible));
+        out.push_str("}\n");
+
+        let path = root.join("config.json");
+        if let Err(error) = std::fs::create_dir_all(root)
+            .and_then(|()| std::fs::write(&path, out))
+        {
+            eprintln!("[shell] ✗ 配置写入失败（{}）：{error}", path.display());
+        }
+    }
+}
+
+/// 把字符串转成 JSON 字面量（转义引号、反斜杠与控制字符）。
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// 极小的 JSON 值类型 + 解析器。
 ///
-/// 配置文件不存在或格式不对时**返回 None 并继续**（用默认值），
-/// 因为一个坏掉的配置文件不该让程序完全起不来。
-fn configured_data_dir(root: &Path) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(root.join("config.json")).ok()?;
-    // 只认这一个字段，因此不引入 JSON 依赖：手写解析对固定形状足够可靠
-    let key = "\"dataDir\"";
-    let start = text.find(key)? + key.len();
-    let rest = &text[start..];
-    let colon = rest.find(':')? + 1;
-    let after = rest[colon..].trim_start();
-    let quote = after.find('"')? + 1;
-    let tail = &after[quote..];
-    let end = tail.find('"')?;
-    let value = &tail[..end];
-    if value.trim().is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(value))
+/// **为什么自己写而不是引入 serde_json**：本项目至今**零第三方依赖**
+/// （内核连 `node_modules` 都没有），而这里只需要读 5 个字段。
+/// 引入 serde 会带来一棵依赖树、更长的编译时间，与项目风格不符。
+///
+/// **为什么不用"按字段名 find 子串"**（那是原来的做法）：
+/// 它对付单个字段够用，但字段一多就会互相干扰 —— 例如 `widgetX` 会匹配到
+/// 出现在它前面的别的键的值里。字段变多时必须换成真解析。
+#[derive(Debug, Clone)]
+enum Json {
+    Null,
+    Bool(bool),
+    Number(f64),
+    Str(String),
+    Array(Vec<Json>),
+    Object(Vec<(String, Json)>),
+}
+
+impl Json {
+    fn parse(text: &str) -> Result<Self, String> {
+        // 容忍 UTF-8 BOM。
+        //
+        // **不是理论问题**：Windows 记事本保存 UTF-8 文件时会加 BOM，
+        // 而配置文件正是要用户手工编辑的东西。不处理的话，
+        // 用户改完保存、重开程序，只会看到"设置不生效" ——
+        // 而真实原因是一个他看不见的字节。（实测：PowerShell 的
+        // `Set-Content -Encoding utf8` 与记事本都会加。）
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        let bytes: Vec<char> = text.chars().collect();
+        let mut at = 0usize;
+        let value = Self::parse_value(&bytes, &mut at)?;
+        Ok(value)
+    }
+
+    fn skip_ws(chars: &[char], at: &mut usize) {
+        while *at < chars.len() && chars[*at].is_whitespace() {
+            *at += 1;
+        }
+    }
+
+    fn parse_value(chars: &[char], at: &mut usize) -> Result<Self, String> {
+        Self::skip_ws(chars, at);
+        let Some(&ch) = chars.get(*at) else {
+            return Err("意外的结尾".to_string());
+        };
+        match ch {
+            '{' => Self::parse_object(chars, at),
+            '[' => Self::parse_array(chars, at),
+            '"' => Ok(Json::Str(Self::parse_string(chars, at)?)),
+            't' | 'f' => Self::parse_bool(chars, at),
+            'n' => {
+                Self::expect(chars, at, "null")?;
+                Ok(Json::Null)
+            }
+            _ => Self::parse_number(chars, at),
+        }
+    }
+
+    fn parse_object(chars: &[char], at: &mut usize) -> Result<Self, String> {
+        *at += 1; // 吃掉 '{'
+        let mut entries = Vec::new();
+        loop {
+            Self::skip_ws(chars, at);
+            if chars.get(*at) == Some(&'}') {
+                *at += 1;
+                return Ok(Json::Object(entries));
+            }
+            let key = Self::parse_string(chars, at)?;
+            Self::skip_ws(chars, at);
+            Self::expect(chars, at, ":")?;
+            let value = Self::parse_value(chars, at)?;
+            entries.push((key, value));
+            Self::skip_ws(chars, at);
+            match chars.get(*at) {
+                Some(&',') => *at += 1,
+                Some(&'}') => {
+                    *at += 1;
+                    return Ok(Json::Object(entries));
+                }
+                _ => return Err("对象里缺少 , 或 }".to_string()),
+            }
+        }
+    }
+
+    fn parse_array(chars: &[char], at: &mut usize) -> Result<Self, String> {
+        *at += 1; // 吃掉 '['
+        let mut items = Vec::new();
+        loop {
+            Self::skip_ws(chars, at);
+            if chars.get(*at) == Some(&']') {
+                *at += 1;
+                return Ok(Json::Array(items));
+            }
+            items.push(Self::parse_value(chars, at)?);
+            Self::skip_ws(chars, at);
+            match chars.get(*at) {
+                Some(&',') => *at += 1,
+                Some(&']') => {
+                    *at += 1;
+                    return Ok(Json::Array(items));
+                }
+                _ => return Err("数组里缺少 , 或 ]".to_string()),
+            }
+        }
+    }
+
+    fn parse_string(chars: &[char], at: &mut usize) -> Result<String, String> {
+        Self::skip_ws(chars, at);
+        if chars.get(*at) != Some(&'"') {
+            return Err("期望字符串".to_string());
+        }
+        *at += 1;
+        let mut out = String::new();
+        while let Some(&ch) = chars.get(*at) {
+            *at += 1;
+            match ch {
+                '"' => return Ok(out),
+                '\\' => {
+                    let Some(&esc) = chars.get(*at) else {
+                        return Err("转义序列不完整".to_string());
+                    };
+                    *at += 1;
+                    match esc {
+                        '"' => out.push('"'),
+                        '\\' => out.push('\\'),
+                        '/' => out.push('/'),
+                        'n' => out.push('\n'),
+                        'r' => out.push('\r'),
+                        't' => out.push('\t'),
+                        'b' => out.push('\u{0008}'),
+                        'f' => out.push('\u{000c}'),
+                        'u' => {
+                            // \uXXXX：只处理基本平面（配置里只会有路径等 ASCII/中文）
+                            let mut code = 0u32;
+                            for _ in 0..4 {
+                                let Some(&hex) = chars.get(*at) else {
+                                    return Err("\\u 转义不完整".to_string());
+                                };
+                                *at += 1;
+                                let digit = hex.to_digit(16).ok_or("\\u 后面不是十六进制")?;
+                                code = code * 16 + digit;
+                            }
+                            out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
+                        }
+                        other => return Err(format!("不认识的转义 \\{other}")),
+                    }
+                }
+                c => out.push(c),
+            }
+        }
+        Err("字符串没有收尾引号".to_string())
+    }
+
+    fn parse_bool(chars: &[char], at: &mut usize) -> Result<Self, String> {
+        if chars.get(*at) == Some(&'t') {
+            Self::expect(chars, at, "true")?;
+            Ok(Json::Bool(true))
+        } else {
+            Self::expect(chars, at, "false")?;
+            Ok(Json::Bool(false))
+        }
+    }
+
+    fn parse_number(chars: &[char], at: &mut usize) -> Result<Self, String> {
+        let start = *at;
+        if chars.get(*at) == Some(&'-') {
+            *at += 1;
+        }
+        while matches!(chars.get(*at), Some(c) if c.is_ascii_digit() || *c == '.' || *c == 'e' || *c == 'E' || *c == '+' || *c == '-') {
+            *at += 1;
+        }
+        let text: String = chars[start..*at].iter().collect();
+        text.parse::<f64>()
+            .map(Json::Number)
+            .map_err(|_| format!("不是合法数字：{text}"))
+    }
+
+    fn expect(chars: &[char], at: &mut usize, literal: &str) -> Result<(), String> {
+        for expected in literal.chars() {
+            if chars.get(*at) != Some(&expected) {
+                return Err(format!("期望 {literal}"));
+            }
+            *at += 1;
+        }
+        Ok(())
+    }
+
+    fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Json::Object(entries) => entries.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            Json::Str(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn as_f64(&self) -> Option<f64> {
+        match self {
+            Json::Number(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn as_i64(&self) -> Option<i64> {
+        self.as_f64().map(|value| value as i64)
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            Json::Bool(value) => Some(*value),
+            _ => None,
+        }
     }
 }
 
@@ -510,7 +1009,8 @@ fn resolve_runtime_paths() -> Result<RuntimePaths, String> {
     //     而且与"浏览器里开发照旧"这个验收标准直接冲突。
     //   · 打包态 → `%APPDATA%\WorkHelper\data` —— 安装目录不可写，必须换地方。
     let root = app_data_root()?;
-    let data_dir = configured_data_dir(&root).unwrap_or_else(|| {
+    let config = ShellConfig::load(&root);
+    let data_dir = config.data_dir.clone().unwrap_or_else(|| {
         if dev {
             kernel_root.join("data")
         } else {
@@ -519,7 +1019,14 @@ fn resolve_runtime_paths() -> Result<RuntimePaths, String> {
     });
     ensure_writable(&data_dir)?;
 
-    Ok(RuntimePaths { kernel_root, resources_dir, data_dir, dev })
+    Ok(RuntimePaths {
+        kernel_root,
+        resources_dir,
+        data_dir,
+        dev,
+        config_root: root,
+        config,
+    })
 }
 
 fn main() {
@@ -545,6 +1052,16 @@ fn main() {
         }
     );
     println!("[shell] 数据目录   = {}", paths.data_dir.display());
+    println!(
+        "[shell] 悬浮组件   = {}，不透明度 {:.2}",
+        if paths.config.widget_visible { "常驻显示" } else { "隐藏" },
+        paths.config.widget_opacity
+    );
+
+    // 配置要交给 Tauri 状态（窗口事件回调里要读写它），先把所有权取出来。
+    // `spawn_kernel` 之后就不再用 `paths.config`，因此这里 clone 一份即可。
+    let config_for_state = paths.config.clone();
+    let config_root_for_state = paths.config_root.clone();
 
     // 端口已被占用时不重复拉起 —— 内核是单实例设计，
     // 第二个进程会因端口冲突失败（或更糟：两个进程写同一个库）
@@ -610,9 +1127,18 @@ fn main() {
             hide_capture_window,
             take_note_request,
             report_note_result,
+            collapse_widget,
+            save_widget_position,
         ])
         // 「记一笔」热键的待处理标记。页面在窗口获得焦点后轮询取走它。
         .manage(NoteRequest(std::sync::atomic::AtomicBool::new(false)))
+        // 悬浮组件是否为输入态。窗口失焦时要据此决定"收起"还是"什么都不做"。
+        .manage(WidgetMode(std::sync::atomic::AtomicBool::new(false)))
+        // 外壳配置（数据目录 + 悬浮组件的位置/透明度/可见性）。
+        .manage(ShellState {
+            config: std::sync::Mutex::new(config_for_state),
+            config_root: config_root_for_state,
+        })
         .setup(move |app| {
             println!(
                 "[shell] 应用就绪，从进程启动算起 {} ms",
@@ -622,6 +1148,16 @@ fn main() {
             // 关闭替身由 WebviewWindowBuilder 的 initialization_script 注入
             // （见 open_capture_window 的说明）—— 必须早于页面脚本，
             // 因此不能放在这里 eval。
+
+            // 悬浮组件（需求 F-17）：**默认常驻显示**（用户确认），
+            // 位置取上次拖动保存的坐标。
+            //
+            // 放在 setup 里而不是配置文件里声明：它的位置与可见性来自配置，
+            // 而配置要到运行时才读得到，声明式配置表达不了"上次拖到哪"。
+            if let Err(error) = create_widget_window(app.handle()) {
+                // 建不出来不该让整个程序起不来 —— 主窗口与热键仍然可用
+                eprintln!("[shell] ✗ {error}");
+            }
 
             // 这里注册热键；冲突时 give up 并说清怎么办
             //
@@ -644,6 +1180,29 @@ fn main() {
         .expect("构建 Tauri 应用失败");
 
     app.run(move |app_handle, event| {
+        // 悬浮组件失焦：**只在输入态才收起**。
+        //
+        // 为什么不无条件收起：idle 态的组件本来就不该有焦点（F-17 要求不抢焦点），
+        // 失焦是它的常态，收起它等于组件刚显示就被藏起来。
+        //
+        // 为什么失焦即收起而不是保持展开：用户点了别处说明改主意了，
+        // 让展开态一直挡着屏幕更糟（用户确认过这个取舍）。
+        if let RunEvent::WindowEvent { label, event: WindowEvent::Focused(false), .. } = &event {
+            if label == WIDGET_LABEL {
+                if let Some(mode) = app_handle.try_state::<WidgetMode>() {
+                    if mode.is_input() {
+                        mode.set(false);
+                        // 页面也要知道 —— 它据此把输入行收起来并清空
+                        if let Some(window) = app_handle.get_webview_window(WIDGET_LABEL) {
+                            let _ = window.eval(
+                                "document.body.classList.remove('mode-input')",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // 关键：**任何**退出路径都要收掉子进程，包括窗口被关闭、
         // 用户从任务管理器结束、以及应用 panic。
         if let RunEvent::ExitRequested { .. } | RunEvent::Exit = event {

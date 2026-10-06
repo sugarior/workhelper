@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>工作秘书 · 悬浮组件</title>
+  <!-- 复用同一份 app.css（里面已有 `.widget-*` 段）。
+       不另开一个 widget.css：两个样式表会各自定义变量与基础规则，
+       迟早出现"同一处在两处定义"的背离。 -->
+  <link rel="stylesheet" href="/app.css?v=0.17.0">
+</head>
+<body class="widget">
+  <!-- 悬浮小组件（需求 F-17）。
+       两个形态共用一个窗口，窗口尺寸固定 = 展开态尺寸：
+         · idle  —— 只有一条细栏，外面用 `drag` 区域接住鼠标以便拖动
+         · input —— Ctrl+Shift+Space 唤出的「记一笔」输入态（F-15c）
+
+       **为什么窗口尺寸固定**：改窗口尺寸要走外壳，而形态切换是高频动作。
+       固定尺寸后切换只改 CSS 类，瞬时完成，也不用每次重算位置。 -->
+
+  <!-- 拖动区：idle 时就是那条细栏本身，input 时退化为顶部的标题行。
+       用 Tauri 的拖动区比自己做"鼠标按下 → 移动窗口"可靠（不会抖、不会丢鼠标）。 -->
+  <div class="widget-bar" id="bar" data-tauri-drag-region>
+    <span class="widget-dot" id="dot"></span>
+    <span class="widget-task" id="task" data-tauri-drag-region>加载中…</span>
+
+    <!-- idle 时显示的数字：今日未结束 / 收件箱未处理（F-17 指定的两条） -->
+    <span class="widget-counts" id="counts">
+      <span class="widget-count" id="count-today" title="今日未结束">–</span>
+      <span class="widget-count" id="count-inbox" title="收件箱未处理">–</span>
+    </span>
+
+    <button class="widget-btn" id="collapse" title="收起（Esc）" aria-label="收起">✕</button>
+  </div>
+
+  <!-- 输入态：只在这一态可见（F-15c 要求顶部显示"记到：…"） -->
+  <div class="widget-input-row" id="inputRow">
+    <span class="widget-target" id="target"></span>
+    <select class="widget-kind" id="kind" aria-label="类型">
+      <option value="progress">进展</option>
+      <option value="blocker">卡点</option>
+      <option value="decision">决定</option>
+      <option value="abort">中止</option>
+    </select>
+    <input class="widget-note" id="note" type="text" placeholder="刚才这件事有什么进展？（Enter 提交）">
+    <button class="widget-save" id="save">记下</button>
+  </div>
+
+  <div class="widget-error" id="error"></div>
+
+  <script type="module" src="/widget.js?v=0.17.0"></script>
+</body>
+</html>
