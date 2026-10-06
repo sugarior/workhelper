@@ -1,16 +1,25 @@
-//! 工作秘书的桌面外壳（实验 B2-a）。
+//! 工作秘书的桌面外壳。
 //!
-//! 这一版**只做一件事**：验证 Tauri 能否可靠地
-//!   1. 找到 node 可执行文件
-//!   2. 拉起 `src/ui/main.ts` 这个已有的 Node 服务
-//!   3. 等它就绪后把窗口指过去（加载的正是你现在浏览器里用的那套界面）
-//!   4. 退出时**干净地收掉整棵进程树**（不留僵尸 node）
+//! 职责（按重要程度）：
+//!   1. 找到 Node 运行时，拉起 `src/ui/main.ts` 这个内核服务，等它就绪
+//!   2. 承载界面：主窗口、快记窗、悬浮组件（都走 Tauri 的应用协议）
+//!   3. 全局热键：`Ctrl+Alt+Space` 快记、`Ctrl+Shift+Space` 记一笔
+//!   4. 系统托盘与"关闭主窗口不退出进程"（**常驻桌面这个形态的落点**）
+//!   5. **任何**退出路径都干净地收掉整棵子进程树（不留僵尸 node）
 //!
-//! 刻意不在这版做全局热键与托盘 —— 那是 B2-b / B2-c 的事。
-//! 一次只验一件事，失败时才知道是哪一环。
-//!
-//! 架构决策（plan §B1-a）：外壳**不碰数据层**，内核一行不改，
-//! 界面仍走 HTTP。所以这个文件里没有任何 SQL、没有任何业务规则。
+//! 架构决策（plan §B1）：外壳**不碰数据层**，内核一行不改，界面走 HTTP。
+//! 因此这个文件里没有 SQL、没有业务规则 —— 它只管进程、窗口、热键、托盘。
+
+// 发布版**不要控制台窗口**：带一个黑框的 GUI 程序会让人以为装错了东西。
+//
+// 用条件编译而不是无条件设 `windows_subsystem = "windows"`：
+//   · 开发时保留控制台 —— 外壳日志（"内核已就绪，耗时 …"）是排查的主要依据，
+//     `println!` 得有个地方去
+//   · 发布时隐藏它 —— 用户不该看到一屏日志
+//
+// **为什么写在这里而不是 Cargo.toml**：那是给库设 crate 类型用的；
+// 二进制 crate 用这个属性最直接，而且能按 debug/release 分别处理。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -152,9 +161,55 @@ fn spawn_kernel(paths: &RuntimePaths) -> Result<Child, String> {
         // 工作目录设为内核根：内核按脚本位置推导它自己的相对基准，
         // 保持一致可以避免"两份不同的相对路径"这类困惑
         .current_dir(&paths.kernel_root)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
         .stdin(Stdio::null());
+
+    // 内核的输出去哪。
+    //
+    // **两种形态必须分开处理，否则发布态会瞎**：
+    //
+    // | 形态 | 外壳有没有控制台 | 内核输出 |
+    // | --- | --- | --- |
+    // | 开发态 | 有（控制台子系统） | **继承** → 直接打在眼前，排查最快 |
+    // | 发布态 | 没有（GUI 子系统） | **落盘** → 写到数据目录下的 `workhelper.log` |
+    //
+    // 发布态若也 `inherit`，内核那十几处 `console.log`（含端口、数据库路径、
+    // 启动失败原因）**会全部消失** —— 用户报"打不开"时手上一点线索都没有。
+    // 这次是差点就这么改过去。
+    //
+    // 日志放**数据目录**而不是安装目录：安装目录（`Program Files` 或
+    // `%LOCALAPPDATA%\Programs`）对普通用户不可写，而数据目录已经被
+    // 验证过可写（见 `resolve_runtime_paths`）。
+    //
+    // 用**追加**而不是覆盖：多次启动的记录留在同一个文件里，
+    // "上次为什么失败、这次为什么能起"才有得比。定期清理留给以后 ——
+    // 只在真有体积问题时才做，现在加是过度设计。
+    if cfg!(debug_assertions) {
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        let log_path = paths.data_dir.join("workhelper.log");
+        match std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            Ok(file) => {
+                // try_clone：两个流各要一个句柄，`Stdio::from` 会取走所有权
+                let for_stderr = file.try_clone();
+                command.stdout(Stdio::from(file));
+                match for_stderr {
+                    Ok(handle) => {
+                        command.stderr(Stdio::from(handle));
+                    }
+                    // 只拿到一个句柄不算失败：stdout 已经能落盘，stderr 退回丢弃
+                    Err(_) => {
+                        command.stderr(Stdio::null());
+                    }
+                }
+            }
+            Err(error) => {
+                // 开不了日志文件**不该让程序起不来** —— 内核本身还能跑、界面还能用。
+                // 但必须留下痕迹：这是发布态唯一的诊断线索。
+                eprintln!("[shell] ✗ 无法打开内核日志 {log_path:?}：{error}");
+                command.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+        }
+    }
 
     // 请求日志开关：设 WORKHELPER_VERBOSE=1 启动外壳即可看到每个 API 请求。
     // 排查"界面到底有没有连上内核"这类问题时，这是最直接的证据 ——

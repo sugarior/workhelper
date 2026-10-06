@@ -1,8 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "工作秘书",
-  "version": "0.2.0",
-  "identifier": "com.workhelper.desktop",  "build": {
+  "version": "0.3.0",
+  "identifier": "com.workhelper.desktop",
+  "build": {
     "frontendDist": "../../src/ui/static",
     "beforeBuildCommand": "node ../../scripts/prepare-resources.mjs"
   },
@@ -23,10 +24,23 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
     "resources": {
       "resources/node": "node",
       "resources/src": "src"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"]
+      }
     }
   }
 }

@@ -260,7 +260,30 @@ async function confirmPick(index) {
 async function submit() {
   if (busy) return;
   const body = noteInput.value.trim();
-  if (body.length === 0) return;
+
+  /**
+   * 空内容时 `Enter` = **收起输入态**（需求 §4.7，用户要求扩展到本组件）。
+   *
+   * 原来这里是 `if (body.length === 0) return;` —— **什么也不做**，
+   * 用户按了回车会以为"坏了"。而 §4.7 早就把这条定下来了，只是当时只写了快记窗：
+   *
+   * > 一个**没有后果的选择**只会让人犹豫……凡是让用户为一个不产生差异的选择
+   * > 而犹豫的设计，都应该消失。
+   *
+   * 要求用户记住"空的时候要用 Esc"就是一个多余的决定。
+   *
+   * **两种情况不能含糊**（与 §4.7 完全一致）：
+   *   · 有内容（哪怕两端带空白、或手滑多按回车）→ **记录**
+   *   · 真正什么都没有 → **收起**（不收窗口、不留提示）
+   *
+   * 判断的是 `trim()` 后长度，因此只要有**任何**可见字符都会记录，
+   * "手滑多按回车丢了一条"不成立。
+   */
+  if (body.length === 0) {
+    exitInputMode();
+    return;
+  }
+
   if (!hasFocus) {
     showError('还没有聚焦的任务 —— 打开主界面，对一条任务点「聚焦」');
     return;
