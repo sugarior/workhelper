@@ -7,6 +7,11 @@
   <link rel="stylesheet" href="/app.css">
 </head>
 <body class="capture">
+  <!-- 兜底关闭按钮：快记窗是无边框的**浮窗**，没有标题栏与系统关闭按钮，
+       而"保存后自动收起"与 Esc 都依赖页面脚本正常。
+       一旦脚本出问题，没有这个按钮就**只能去杀进程** —— 实测遇到过一次。
+       放在页面而不是由外壳注入：浏览器与桌面壳两种环境下都自然可用。 -->
+  <button id="close" class="capture-close" title="关闭（Esc）" aria-label="关闭">×</button>
   <div class="capture-card">
     <textarea id="text" class="capture-input" autofocus
       placeholder="记一句…（Enter 保存，Shift+Enter 换行，Esc 取消）"></textarea>
@@ -29,6 +34,6 @@
     <div class="error-line" id="error"></div>
   </div>
 
-  <script type="module" src="/capture.js?v=0.10.0"></script>
+  <script type="module" src="/capture.js?v=0.11.0"></script>
 </body>
 </html>

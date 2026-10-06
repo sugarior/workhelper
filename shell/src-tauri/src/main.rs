@@ -1,4 +1,4 @@
-﻿//! 工作秘书的桌面外壳（实验 B2-a）。
+//! 工作秘书的桌面外壳（实验 B2-a）。
 //!
 //! 这一版**只做一件事**：验证 Tauri 能否可靠地
 //!   1. 找到 node 可执行文件
@@ -241,17 +241,34 @@ fn hide_capture_window(window: tauri::WebviewWindow) -> Result<(), String> {
     window.hide().map_err(|e| e.to_string())
 }
 
-/// 打开快记窗：不存在就建（走应用协议 + 注入关闭替身），存在就显示。
+/// 打开快记窗：不存在就建（走应用协议 + 注入关闭替身），存在就显示并**重载页面**。
 ///
 /// **必须走应用协议**（`WebviewUrl::App`）而不是外部 http 地址 ——
 /// 后者没有 Tauri 的 JS 通道，`window.close` 替身注入不进去（见 `CLOSE_SHIM` 的说明）。
+///
+/// **每次唤出都重载页面** —— 修的是一个真实缺陷：
+/// 窗口只是 `hide()`（为了复用、省掉 380ms 的 WebView2 初始化），页面**没有销毁**，
+/// 于是两处状态残留下来：
+///   · `.closing` 类（`opacity: 0` + 动画 `forwards` 保持）→ 再唤出时**看得见框、看不见内容**
+///   · `capture.js` 的模块级 `finished = true` → 保存逻辑开头就是 `if (finished) return`，
+///     于是**再也不能写入**（用户实测报告："保存一次后再次呼出不能写入了"）
+///
+/// 重载把这两处（以及将来任何新增的模块级状态）一次性归零，
+/// **不需要往界面代码里加"重置钩子"** —— 那种钩子会随功能增加而必然漏掉几处。
 fn open_capture_window(app: &tauri::AppHandle) {
     let began = Instant::now();
 
     if let Some(window) = app.get_webview_window(CAPTURE_LABEL) {
         let _ = window.show();
         let _ = window.set_focus();
-        println!("[shell] 快记窗唤出，耗时 {} ms", began.elapsed().as_millis());
+        // 重载会让页面重新走一遍加载流程（含 initialization_script），
+        // 因此 `window.close` 替身也是新的，不必手动补。
+        if let Err(error) = window.eval("location.reload()") {
+            // eval 失败不该让窗口不出现：最坏情况回到"状态残留"的旧行为，
+            // 但必须说出来 —— 静默失败正是这个缺陷最初难查的原因。
+            eprintln!("[shell] 快记窗重载失败（将沿用上一轮状态）：{error}");
+        }
+        println!("[shell] 快记窗唤出并重载，耗时 {} ms", began.elapsed().as_millis());
         return;
     }
 

@@ -14,6 +14,7 @@ const textarea = document.getElementById('text');
 const hintBox = document.getElementById('hint');
 const errorBox = document.getElementById('error');
 const saveButton = document.getElementById('save');
+const closeButton = document.getElementById('close');
 const chipsBox = document.getElementById('chips');
 
 let kindHint = 'todo';
@@ -125,6 +126,11 @@ async function save() {
   finished = true;
   closeWindow();
 }
+
+// 兜底关闭按钮：浮窗没有标题栏，脚本若失效就没有任何关闭途径。
+// 复用同一个 closeWindow()（它内部走 window.close，桌面壳里被替身接管），
+// 因此不引入第二条关闭路径 —— 那正是"同一规则写在两处"的形态。
+closeButton.addEventListener('click', () => window.close());
 
 saveButton.addEventListener('click', () => void save());
 

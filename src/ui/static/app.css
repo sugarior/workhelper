@@ -304,6 +304,30 @@ body.capture {
 }
 .saved-toast.show { opacity: 1; }
 
+/* 兜底关闭按钮。
+   快记窗是无边框浮窗，没有标题栏与系统关闭按钮；而"保存后自动收起"与 Esc
+   都依赖页面脚本正常工作。脚本一旦出问题就没有任何关闭途径 —— 实测遇到过一次，
+   只能去杀进程。这个按钮是那道兜底。 */
+.capture-close {
+  position: fixed;
+  top: 6px;
+  right: 8px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: #d64545;
+  color: #fff;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.85;
+  z-index: 10;
+}
+.capture-close:hover { opacity: 1; background: #c03434; }
+.capture-close:active { transform: scale(0.94); }
+
 .closing { animation: collapse 0.3s ease-in forwards; }
 @keyframes collapse {
   to { opacity: 0; transform: translateY(-8px) scale(0.985); }
