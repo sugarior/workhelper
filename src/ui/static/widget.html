@@ -7,7 +7,7 @@
   <!-- 复用同一份 app.css（里面已有 `.widget-*` 段）。
        不另开一个 widget.css：两个样式表会各自定义变量与基础规则，
        迟早出现"同一处在两处定义"的背离。 -->
-  <link rel="stylesheet" href="/app.css?v=0.21.0">
+  <link rel="stylesheet" href="/app.css?v=0.22.0">
 </head>
 <body class="widget">
   <!-- 悬浮小组件（需求 F-17）。
@@ -23,11 +23,17 @@
        而这条栏几乎被文字填满 —— 用户点到的是子元素，于是完全拖不动。
        `deep` 让子树内任意位置都能拖动。
 
-       可点元素（按钮/输入框）默认就阻止拖动，因此按钮不需要额外处理；
-       但两个数字标签要显式排除 —— 它们看着不是按钮，拖到它们身上却应该能拖。 -->
+       **但 `deep` 会吞掉子元素的 click**（见任务名那条注释）：
+       Tauri 的判定里 `attr === 'deep'` 在"可点元素阻止拖动"之前返回 true，
+       于是普通 `<span>` 也变成拖动区，mousedown 触发拖动、click 永不发生。
+       因此**凡是要响应点击的元素，都必须显式写 `="false"` 把它排除**。 -->
   <div class="widget-bar" id="bar" data-tauri-drag-region="deep">
     <span class="widget-dot" id="dot"></span>
-    <span class="widget-task" id="task">加载中…</span>
+
+    <!-- 任务名 = 切换聚焦任务的按钮（点击弹出选焦点栏）。
+         **必须显式排除拖动**，否则第一次点击被拖动吃掉、第二次才落到元素上 ——
+         表现就是"要双击才能呼出"（实测：mousedown 到 2 次、click 0 次）。 -->
+    <span class="widget-task" id="task" data-tauri-drag-region="false">加载中…</span>
 
     <!-- idle 时显示的数字：今日未结束 / 收件箱未处理（F-17 指定的两条） -->
     <span class="widget-counts" id="counts">
@@ -68,6 +74,6 @@
     <ul class="widget-pick-list" id="pickList"></ul>
   </div>
 
-  <script type="module" src="/widget.js?v=0.21.0"></script>
+  <script type="module" src="/widget.js?v=0.22.0"></script>
 </body>
 </html>
