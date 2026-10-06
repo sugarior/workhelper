@@ -1,0 +1,24 @@
+[package]
+name = "workhelper-shell"
+version = "0.1.0"
+edition = "2021"
+description = "工作秘书的桌面外壳：拉起 Node 内核、注册全局热键、承载界面"
+# 外壳是二进制 crate，不对外暴露库接口
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2.7.1", features = [] }
+
+[dependencies]
+tauri = { version = "2.12.1", features = [] }
+# 全局快捷键（实验 B2-b 用）
+tauri-plugin-global-shortcut = "2.4.0"
+# 在 PATH 里找 node。自己解析 PATH 要处理 .exe/.cmd、PATHEXT、大小写等一堆细节，
+# 而这个 crate 足够小且只做这一件事。
+which = "8.0.6"
+
+# 只发 release 的 strip，减小体积
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

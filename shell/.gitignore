@@ -1,0 +1,11 @@
+# Tauri 外壳的编译产物与依赖缓存
+#
+# 这些目录**不进版本库**：target/ 会涨到几个 GB，
+# 而依赖可以随时由 Cargo.lock + 网络重建。
+
+# 编译产物（实际位置由 .cargo/config.toml 指到 D:/cargo-target/workhelper-shell）
+/target/
+**/target/
+
+# 若有人临时改回默认 target-dir，这个也一并忽略
+/src-tauri/target/
