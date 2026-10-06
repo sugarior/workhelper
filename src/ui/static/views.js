@@ -2004,114 +2004,136 @@ export function materialFoldRow(type, id) {
 // 因此本页**分别取两处、合并显示** —— 而不是在某一侧做代理，
 // 那会多一层没有收益的转发。
 
-/** 设置页的渲染。 */
+/**
+ * 设置页的渲染。
+ *
+ * **骨架立刻画出来，两块内容各自异步填**。
+ *
+ * 这样安排的依据是实测：外壳的 `get_shell_settings` **首次调用要 1 秒以上**
+ * （WebView 与外壳之间的 IPC 通道首次建立），冷启动更久；而内核调用是十几毫秒。
+ * 原来整页等两块都到齐才画，"外壳慢"就表现成"设置页打不开" ——
+ * 用户实测报过"设置页一直显示加载中"。
+ *
+ * 现在最坏情况也只是"外壳那几项晚一点出现"，页面本身永远不空白。
+ */
 export async function renderSettings(root) {
-  const outcome = await loadShellSettings();
-  let dayBoundaryHour = null;
-  try {
-    dayBoundaryHour = await api.dayBoundaryHour();
-  } catch (error) {
-    mount(root, [
-      el('h2', {}, '设置'),
-      el('div', { class: 'empty' }, `读取设置失败：${error.message}`),
-    ]);
-    return;
-  }
+  const dataGroup = el('div', { class: 'settings-group' }, [
+    el('h3', {}, '数据'),
+    el('div', { class: 'settings-hint' }, '读取中…'),
+  ]);
+  const shellGroup = el('div', { class: 'settings-group' }, [
+    el('h3', {}, '外壳'),
+    el('div', { class: 'settings-hint' }, '读取中…'),
+  ]);
 
+  // **一次 mount，之后只换分组内容**。不要在这里 await 任何东西 ——
+  // 一旦 await，`render()` 里那句"加载中…"就会留到数据回来为止。
+  mount(root, [el('h2', {}, '设置'), dataGroup, shellGroup]);
+
+  // 两块来源独立（内核 / 外壳），因此**并行取**，谁先到谁先画
+  void api.dayBoundaryHour().then(
+    (hour) => dataGroup.replaceChildren(...dataGroupChildren(hour, root)),
+    (error) => dataGroup.replaceChildren(
+      el('h3', {}, '数据'),
+      el('div', { class: 'empty' }, `读取设置失败：${error.message}`),
+    ),
+  );
+
+  void loadShellSettings().then(
+    (outcome) => shellGroup.replaceChildren(...shellGroupChildren(outcome, root)),
+  );
+}
+
+/** 「数据」分组的节点：每日切日时刻 + 数据目录说明。 */
+function dataGroupChildren(dayBoundaryHour, root) {
+  return [
+    el('h3', {}, '数据'),
+    boundaryRow(dayBoundaryHour, root),
+  ];
+}
+
+/**
+ * 「外壳」分组的节点。
+ *
+ * 分出来是因为"骨架先画、内容后填"需要同一份构造逻辑被调用一次 ——
+ * 若以后再有两处用它，抄一遍就会出现"补画的那次少了一项"这种迟早发生的不一致。
+ */
+function shellGroupChildren(outcome, root) {
   if (outcome.kind === 'none') {
     // 浏览器里开发时没有外壳。**明说**而不是显示一堆不可用的控件 ——
     // 那会让人以为"这些设置坏了"。
-    mount(root, [
-      el('h2', {}, '设置'),
-      el('div', { class: 'empty' },
-        '外壳相关的设置（热键、悬浮组件、开机自启）需要在桌面程序里查看。'
-        + '浏览器里开发时只显示数据侧的设置。'),
-      el('div', { class: 'settings-group' }, [
-        el('h3', {}, '数据'),
-        boundaryRow(dayBoundaryHour, root),
-      ]),
-    ]);
-    return;
+    return [
+      el('h3', {}, '外壳'),
+      el('div', { class: 'settings-hint' },
+        '外壳相关的设置（热键、悬浮组件、开机自启）需要在桌面程序里查看；'
+        + '浏览器里开发时只有上面那些数据侧的设置。'),
+    ];
   }
 
   if (outcome.kind === 'timeout') {
     // **有外壳，但它没回话**。这与"没有外壳"是两回事，不能显示成同一句 ——
     // 否则用户会以为"这些设置在浏览器里本来就没有"，而真相是外壳出了问题。
-    // 数据侧的那一项仍然显示（它不经过外壳，已经取到了）。
-    mount(root, [
-      el('h2', {}, '设置'),
-      el('div', { class: 'empty' },
+    return [
+      el('h3', {}, '外壳'),
+      el('div', { class: 'settings-hint' },
         '外壳没有回话，因此热键、悬浮组件、开机自启这几项暂时读不到。'
-        + '数据侧的设置仍然可用；可以稍后重开这一页再试。'),
-      el('div', { class: 'settings-group' }, [
-        el('h3', {}, '数据'),
-        boundaryRow(dayBoundaryHour, root),
-      ]),
-    ]);
-    return;
+        + '数据侧的设置不受影响；稍后重开这一页再试。'),
+    ];
   }
 
   const shell = outcome.value;
-  mount(root, [
-    el('h2', {}, '设置'),
+  return [
+    el('h3', {}, '悬浮组件'),
+    el('div', { class: 'settings-row' }, [
+      el('label', {}, '常驻显示'),
+      toggle(shell.widgetVisible, async (next) => {
+        await setShellSetting('widgetVisible', next);
+        await renderSettings(root);
+      }),
+    ]),
+    el('div', { class: 'settings-row' }, [
+      el('label', {}, '不透明度'),
+      opacitySlider(shell.widgetOpacity),
+    ]),
+    el('div', { class: 'settings-sep' }),
 
-    el('div', { class: 'settings-group' }, [
-      el('h3', {}, '数据'),
-      boundaryRow(dayBoundaryHour, root),
-      // 数据目录**只读显示**：改它要动 config.json 且需重启（见 plan §4.1.2
-      // 的用户确认）。给一个输入框会让人以为改完立刻生效 —— 那更容易出错。
-      el('div', { class: 'settings-row' }, [
-        el('label', {}, '数据目录'),
-        el('div', { class: 'settings-value' }, [
-          el('code', {}, shell.dataDir),
-          el('div', { class: 'settings-hint' },
-            `改动需编辑 ${shell.configPath} 并重启（界面改写它会让"文件位置"与"运行中的库"不一致）`),
-        ]),
+    el('h3', {}, '开机自启'),
+    el('div', { class: 'settings-row' }, [
+      el('label', {}, '随系统启动'),
+      toggle(shell.autostartEnabled, async (next) => {
+        try {
+          await setShellSetting('autostartEnabled', next);
+          flash(next ? '已开启开机自启' : '已关闭开机自启');
+        } catch (error) {
+          flash(`设置开机自启失败：${error.message}`, 'error');
+        }
+        await renderSettings(root);
+      }),
+    ]),
+    el('div', { class: 'settings-hint' },
+      '写在当前用户的注册表 Run 键下，不需要管理员权限；启动后常驻托盘。'),
+    el('div', { class: 'settings-sep' }),
+
+    el('h3', {}, '快捷键'),
+    hotkeyRow('快记', shell.hotkeyCapture),
+    hotkeyRow('记一笔', shell.hotkeyNote),
+    el('div', { class: 'settings-hint' },
+      '快捷键暂不支持在界面里改（要改请编辑外壳源码里的常量并重新编译）。'
+      + '做成自定义需要一个按键捕获控件与冲突检测，已列入后续迭代。'),
+
+    el('div', { class: 'settings-sep' }),
+    // 数据目录放在外壳这一组：它其实是"这台机器上装在哪"，
+    // 由外壳解析并保证可写（见 main.rs 的 resolve_runtime_paths）。
+    el('h3', {}, '数据目录'),
+    el('div', { class: 'settings-row' }, [
+      el('label', {}, '位置'),
+      el('div', { class: 'settings-value' }, [
+        el('code', {}, shell.dataDir),
+        el('div', { class: 'settings-hint' },
+          `改动需编辑 ${shell.configPath} 并重启（界面改写它会让"文件位置"与"运行中的库"不一致）`),
       ]),
     ]),
-
-    el('div', { class: 'settings-group' }, [
-      el('h3', {}, '悬浮组件'),
-      el('div', { class: 'settings-row' }, [
-        el('label', {}, '常驻显示'),
-        toggle(shell.widgetVisible, async (next) => {
-          await setShellSetting('widgetVisible', next);
-          await renderSettings(root);
-        }),
-      ]),
-      el('div', { class: 'settings-row' }, [
-        el('label', {}, '不透明度'),
-        opacitySlider(shell.widgetOpacity, root),
-      ]),
-    ]),
-
-    el('div', { class: 'settings-group' }, [
-      el('h3', {}, '开机自启'),
-      el('div', { class: 'settings-row' }, [
-        el('label', {}, '随系统启动'),
-        toggle(shell.autostartEnabled, async (next) => {
-          try {
-            await setShellSetting('autostartEnabled', next);
-            flash(next ? '已开启开机自启' : '已关闭开机自启');
-          } catch (error) {
-            flash(`设置开机自启失败：${error.message}`, 'error');
-          }
-          await renderSettings(root);
-        }),
-      ]),
-      el('div', { class: 'settings-hint' },
-        '写在当前用户的注册表 Run 键下，不需要管理员权限；启动后常驻托盘。'),
-    ]),
-
-    el('div', { class: 'settings-group' }, [
-      el('h3', {}, '快捷键'),
-      hotkeyRow('快记', shell.hotkeyCapture),
-      hotkeyRow('记一笔', shell.hotkeyNote),
-      el('div', { class: 'settings-hint' },
-        '快捷键暂不支持在界面里改（要改请编辑外壳源码里的常量并重新编译）。'
-        + '做成自定义需要一个按键捕获控件与冲突检测，已列入后续迭代。'),
-    ]),
-  ]);
+  ];
 }
 
 /** 行：每日边界小时（F-19）。 */
@@ -2158,7 +2180,7 @@ function toggle(checked, onChange) {
 }
 
 /** 不透明度的滑块：拖动时就预览，松手才落盘。 */
-function opacitySlider(current, root) {
+function opacitySlider(current) {
   const input = el('input', {
     type: 'range', min: '0.3', max: '1', step: '0.05', class: 'settings-range',
   });

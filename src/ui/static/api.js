@@ -33,11 +33,23 @@
  */
 let apiBasePromise = null;
 
+/**
+ * 发现 API 地址时那次探测的超时。
+ *
+ * 比正常调用短得多：探测只是问一句"你在这儿吗"。
+ * **不能让它拖住整条链**：`apiBase()` 的结果被缓存，因此**每个**接口调用
+ * 都要先等这一步 —— 这一步挂住等于所有请求都挂住。
+ */
+const PROBE_TIMEOUT_MS = 3000;
+
 async function resolveApiBase() {
   const sameOrigin = location.origin;
   // 同源探测：开发时（浏览器直接开 7317）走这条，一次就成
   try {
-    const probe = await fetch(`${sameOrigin}/api-base`, { cache: 'no-store' });
+    const probe = await fetch(`${sameOrigin}/api-base`, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
     if (probe.ok) {
       const data = await probe.json();
       if (typeof data?.base === 'string' && data.base.length > 0) return data.base;
@@ -48,7 +60,10 @@ async function resolveApiBase() {
 
   for (const candidate of ['http://127.0.0.1:7317']) {
     try {
-      const probe = await fetch(`${candidate}/api-base`, { cache: 'no-store' });
+      const probe = await fetch(`${candidate}/api-base`, {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+      });
       if (!probe.ok) continue;
       const data = await probe.json();
       if (typeof data?.base === 'string' && data.base.length > 0) return data.base;
@@ -66,6 +81,21 @@ function apiBase() {
   return apiBasePromise;
 }
 
+/**
+ * 单次接口调用的超时。
+ *
+ * **必须有**：正常情况下本地请求是毫秒级，但如果内核**接受连接却不响应**
+ * （崩溃中、重启中、卡在某个慢操作上），`fetch` 会**一直等下去** ——
+ * 没有超时的话，等它的那个界面就永久停在"加载中"。
+ *
+ * 用户实测报过这个现象：**设置页一直显示"加载中"**。
+ * 设置页正是"必须等数据到手才能画"的那一页，因此它最先暴露这个问题。
+ *
+ * 取 8 秒：一次真实查询远低于此（含首次建库），因此这个上限只在真出问题时触发；
+ * 而 8 秒也短到"等一下然后看到一句错误"仍可接受 —— 比永久加载好得多。
+ */
+const CALL_TIMEOUT_MS = 8000;
+
 /** 调用一个服务方法。失败时抛出带有后端可读消息的错误。 */
 export async function call(service, method, params) {
   const normalized =
@@ -74,10 +104,13 @@ export async function call(service, method, params) {
         : [params];
 
   const base = await apiBase();
+  // `AbortSignal.timeout` 到点会让 fetch 以一个 AbortError 拒绝，
+  // 因此下面那个 catch 分支不会把它变成"看不懂的异常"
   const response = await fetch(`${base}/api/${service}/${method}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ params: normalized }),
+    signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
   });
 
   let payload;

@@ -820,7 +820,11 @@ fn get_shell_settings(app: tauri::AppHandle) -> Result<serde_json::Value, String
         "widgetOpacity": config.widget_opacity,
         "dataDir": app.try_state::<DataDirView>().map(|d| d.0.clone()).unwrap_or_default(),
         "configPath": config_path.to_string_lossy(),
-        "autostartEnabled": autostart_enabled(),
+        // **读缓存，不现查注册表**：现查要 spawn `reg.exe`，实测 441–611ms，
+        // 而且是在外壳主线程上 —— 那会把同一时刻的其它 invoke 一起拖住。
+        // 缓存在启动时读一次注册表填上，改设置时更新（见 `set_shell_setting`）。
+        "autostartEnabled": config.autostart_enabled.unwrap_or(false),
+        "autostartKnown": config.autostart_enabled.is_some(),
         "hotkeyCapture": HOTKEY_CAPTURE,
         "hotkeyNote": HOTKEY_NOTE,
     }))
@@ -859,6 +863,8 @@ fn set_shell_setting(
             "autostartEnabled" => {
                 let enabled = value.as_bool().ok_or("autostartEnabled 需要布尔值")?;
                 set_autostart(enabled)?;
+                // 注册表刚改过，缓存跟着更新 —— 否则设置页会显示旧状态
+                config.autostart_enabled = Some(enabled);
                 serde_json::json!(enabled)
             }
             other => return Err(format!("不认识的设置项：{other}")),
@@ -1411,6 +1417,21 @@ struct ShellConfig {
     widget_opacity: f64,
     /// 悬浮组件是否常驻显示（托盘可关）
     widget_visible: bool,
+    /// 开机自启的**缓存**（注册表才是真相，这里是它的影子）
+    ///
+    /// **为什么要缓存**：查注册表要 spawn 一个 `reg.exe` 子进程并等它结束，
+    /// 实测一次 **441–611ms**（对照：其它外壳命令只要 10–20ms）。
+    /// 而设置页每次打开都要读这个值 —— 用户会看到"外壳那几项"空白近一秒。
+    ///
+    /// 更糟的是它**阻塞外壳主线程**：`invoke` 处理跑在主线程上，
+    /// 于是这一次慢调用会把**同一时刻的其它外壳命令一起拖住**。
+    ///
+    /// 缓存的正确性怎么保证：
+    ///   · 启动时读一次注册表并写回配置（磁盘上这份因此总是上次数到的真值）
+    ///   · 每次改自启后立刻更新缓存
+    ///   · 用户若用别的工具改注册表，下次启动就会被读到并纠正
+    /// 也就是说，**真相仍是注册表**，缓存只在两次启动之间使用。
+    autostart_enabled: Option<bool>,
 }
 
 impl Default for ShellConfig {
@@ -1421,6 +1442,8 @@ impl Default for ShellConfig {
             widget_opacity: 0.92,
             // 需求 F-17：默认常驻显示（托盘菜单可关闭）
             widget_visible: true,
+            // 未知：等启动时读一次注册表填上
+            autostart_enabled: None,
         }
     }
 }
@@ -1451,6 +1474,11 @@ impl ShellConfig {
         if let Some(value) = json.get("widgetVisible").and_then(Json::as_bool) {
             config.widget_visible = value;
         }
+        // 自启的缓存：磁盘上没有就保持 `None`（表示"还没读过注册表"），
+        // 由启动流程去读一次真值。
+        if let Some(value) = json.get("autostartEnabled").and_then(Json::as_bool) {
+            config.autostart_enabled = Some(value);
+        }
         let x = json.get("widgetX").and_then(Json::as_i64);
         let y = json.get("widgetY").and_then(Json::as_i64);
         if let (Some(x), Some(y)) = (x, y) {
@@ -1477,7 +1505,16 @@ impl ShellConfig {
             None => out.push_str("  \"widgetX\": null,\n  \"widgetY\": null,\n"),
         }
         out.push_str(&format!("  \"widgetOpacity\": {},\n", self.widget_opacity));
-        out.push_str(&format!("  \"widgetVisible\": {}\n", self.widget_visible));
+        out.push_str(&format!("  \"widgetVisible\": {},\n", self.widget_visible));
+        out.push_str(&format!(
+            "  \"autostartEnabled\": {}\n",
+            match self.autostart_enabled {
+                Some(value) => value.to_string(),
+                // 还没读过注册表就写 null：下次启动会去读，
+                // **不要写 false** —— 那会把"未知"伪装成"已关闭"
+                None => "null".to_string(),
+            }
+        ));
         out.push_str("}\n");
 
         let path = root.join("config.json");
@@ -1824,6 +1861,25 @@ fn main() {
         }
     );
     println!("[shell] 数据目录   = {}", paths.data_dir.display());
+
+    // 开机自启：**启动时读一次注册表**（注册表是真相），之后走配置里的缓存。
+    //
+    // 放在这里而不是 `get_shell_settings` 里现查：现查要 spawn `reg.exe`，
+    // 实测一次 441–611ms，而且是在外壳主线程上阻塞 ——
+    // 那会把同一时刻的其它外壳命令一起拖住（对照：别的命令只需 10–20ms）。
+    //
+    // 此刻启动本来就要等内核就绪（1 秒多），这几十毫秒夹在里面看不出来。
+    let mut paths = paths;
+    let registry_autostart = autostart_enabled();
+    if paths.config.autostart_enabled != Some(registry_autostart) {
+        // 与缓存不一致：说明用户用别的工具改过，或这是第一次运行 —— 以注册表为准
+        println!(
+            "[shell] 开机自启   = {}（注册表实况）",
+            if registry_autostart { "已开启" } else { "未开启" }
+        );
+    }
+    paths.config.autostart_enabled = Some(registry_autostart);
+    paths.config.save(&paths.config_root);
     println!(
         "[shell] 悬浮组件   = {}，不透明度 {:.2}",
         if paths.config.widget_visible { "常驻显示" } else { "隐藏" },

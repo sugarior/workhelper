@@ -294,6 +294,14 @@ textarea.log-body { width: 100%; min-height: 190px; resize: vertical; font-famil
   line-height: 1.5;
 }
 
+/* 组内分隔线：一个 .settings-group 里放多个小节
+   （外壳那组有 悬浮组件 / 开机自启 / 快捷键 / 数据目录 四节），用细线分段。 */
+.settings-sep {
+  height: 1px;
+  margin: 14px 0;
+  background: var(--border);
+}
+
 .settings-inline { display: flex; align-items: center; gap: 10px; }
 .settings-num {
   min-width: 40px;
