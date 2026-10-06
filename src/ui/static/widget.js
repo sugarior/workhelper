@@ -51,9 +51,11 @@ async function refresh() {
     // F-17 指定的两条数字：今日未结束 + 收件箱未处理
     setCount(countToday, today.counts.open);
     setCount(countInbox, today.inboxCount);
-    // 目标写进 placeholder，而不是单独一行"记到：…"
-    // —— 省下的空间给输入内容，写入时能看到更长的预览（用户要求）。
-    noteInput.placeholder = hasFocus ? `记到「${focus.title}」…` : '记一笔…';
+    // 目标**不在** placeholder 里重复 —— 小条上的任务名就在上面，
+    // 而 placeholder 是留给"要写什么"的提示。
+    // （曾经把目标写进 placeholder，是因为那时输入态会把小条文字收起来；
+    //   现在小条保持不动，再写一遍就是同一信息出现两次。）
+    noteInput.placeholder = hasFocus ? '记一笔…' : '先选一个聚焦的任务';
   } catch {
     // 内核还没起来（应用刚启动）时会走到这里。**不显示错误** ——
     // 那不是用户的错，也没有他能做的事；显示"加载失败"只会让人以为坏了。

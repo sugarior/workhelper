@@ -252,170 +252,7 @@ ul.list > li:hover { background: var(--bg-soft); }
 
 textarea.log-body { width: 100%; min-height: 190px; resize: vertical; font-family: inherit; }
 
-/* ---------- 悬浮小组件（需求 F-17）----------
-   目标：**像贴在桌面上的便签，而不是一个小窗口**。
-   三条让它不"跳出来"的做法：
-     1. 根元素透明 —— 没有窗口底色，圆角处不会露出方块
-     2. 半透明背景 + 背景模糊 —— 压在别的窗口上也看得见底下
-     3. 细、矮、字小 —— 占用视野小，才可能真的常驻
 
-   窗口尺寸是固定的（展开态尺寸），**形态切换只改 CSS 类**，
-   不改窗口尺寸 —— 后者要走外壳，对高频动作太慢。 */
-body.widget {
-  /* 面板透明度：**只有外壳一个来源**（通过 URL 参数 → 内联样式写在根元素上）。
-     这里刻意**不写默认值** —— 写了就会在本元素上重新定义变量、
-     覆盖掉外壳给的值（实测踩到：外壳给 0.85，界面显示 0.82）。
-     缺值时的兜底在 .widget-bar 的 var() 回退参数里。 */
-  background: transparent;
-  margin: 0;
-  padding: 10px 10px 0;
-  font-size: 12px;
-  /* 组件整体不该能被选中文字：那是一块 UI，不是文档 */
-  user-select: none;
-  overflow: hidden;
-}
-
-.widget-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 34px;
-  padding: 0 4px 0 10px;
-  border-radius: 8px;
-  /* 底与字的对比度固定（--widget-bg），只有背景 alpha 随设置变。
-     var() 的回退值就是"外壳没给值"时的默认透明度。 */
-  background: rgba(var(--widget-bg, 28, 32, 38), var(--widget-alpha, 0.82));
-  backdrop-filter: blur(10px);
-  color: #e8eaed;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
-}
-
-/* 焦点指示点：有焦点任务时点亮。一眼看出"我在做哪件" */
-.widget-dot {
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #6b7280;
-}
-body.has-focus .widget-dot { background: #4ade80; }
-
-.widget-task {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: 12.5px;
-  white-space: nowrap;
-  overflow: hidden;
-  /* 任务名可能很长：用省略号而不是换行 —— 换行会让细栏变成两行，破坏形态 */
-  text-overflow: ellipsis;
-}
-body.has-focus .widget-task { font-weight: 600; }
-
-.widget-counts { flex: 0 0 auto; display: flex; gap: 3px; }
-.widget-count {
-  min-width: 18px;
-  padding: 1px 5px;
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.13);
-  text-align: center;
-  font-variant-numeric: tabular-nums;
-}
-.widget-count.zero { opacity: 0.4; }
-
-.widget-btn {
-  flex: 0 0 auto;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: #9aa0a6;
-  /* V 形展开符号：用字符会比画 SVG 简单，也不需要额外请求。
-     字号调大让它看起来像箭头而不是逗号。 */
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-}
-.widget-btn:hover { background: rgba(255, 255, 255, 0.16); color: #fff; }
-
-/* 输入态：idle 时整行不占空间也不可见 */
-.widget-input-row {
-  display: none;
-  align-items: center;
-  gap: 6px;
-  margin-top: 8px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: rgba(var(--widget-bg, 28, 32, 38), calc(var(--widget-alpha, 0.82) + 0.08));
-  backdrop-filter: blur(10px);
-  color: #e8eaed;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
-}
-body.mode-input .widget-input-row { display: flex; }
-
-/* 输入态时把小条里的文字与按钮收起来：
-   目标已经写进输入框的 placeholder，再显示一遍是重复；
-   而小条空着会让展开的面板看起来有两层。 */
-body.mode-input .widget-task,
-body.mode-input .widget-counts,
-body.mode-input .widget-btn { display: none; }
-
-.widget-target {
-  flex: 0 0 auto;
-  max-width: 40%;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: #9aa0a6;
-}
-
-.widget-kind {
-  flex: 0 0 auto;
-  background: rgba(255, 255, 255, 0.1);
-  color: #e8eaed;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 5px;
-  padding: 3px 4px;
-  font-size: 12px;
-}
-.widget-kind option { background: #1c2026; color: #e8eaed; }
-
-.widget-note {
-  flex: 1 1 auto;
-  min-width: 0;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 5px;
-  padding: 5px 8px;
-  color: #fff;
-  font-size: 12.5px;
-  user-select: text;
-}
-.widget-note:focus { outline: none; border-color: #4a9eff; }
-.widget-note::placeholder { color: #7b8188; }
-
-.widget-save {
-  flex: 0 0 auto;
-  border: none;
-  border-radius: 5px;
-  padding: 5px 11px;
-  background: #3b82f6;
-  color: #fff;
-  font-size: 12.5px;
-  cursor: pointer;
-}
-.widget-save:hover { background: #2f6feb; }
-.widget-save:disabled { opacity: 0.55; cursor: default; }
-
-.widget-error {
-  margin-top: 5px;
-  padding: 0 2px;
-  color: #fca5a5;
-  font-size: 11.5px;
-  min-height: 14px;
-}
-.widget-error.ok { color: #86efac; }
 
 /* ---------- 快记窗 ----------
    形态目标：**Windows 对话框**。
@@ -619,3 +456,183 @@ body.capture {
   cursor: pointer;
 }
 .fold-toggle:hover { opacity: 1; text-decoration: underline; }
+
+/* ---------- 悬浮小组件（需求 F-17）----------
+   **本段必须放在文件末尾**：上面有全局规则
+   `input[type="text"], textarea, select { background: var(--bg-raised) }`，
+   它与 `.widget-note` 权重相同，靠**出现顺序**决定胜负。
+   放在前面时它会把输入框背景改成 `--bg-raised`，
+   而浅色模式下那是白色 —— 与这里的白字凑成"白字白底"，
+   表现是"输入了东西却看不到字，连光标也看不见"（实测踩到）。
+   `body.capture` 段也是同样的组织方式，这里保持一致。
+   目标：**像贴在桌面上的便签，而不是一个小窗口**。
+   三条让它不"跳出来"的做法：
+     1. 根元素透明 —— 没有窗口底色，圆角处不会露出方块
+     2. 半透明背景 + 背景模糊 —— 压在别的窗口上也看得见底下
+     3. 细、矮、字小 —— 占用视野小，才可能真的常驻
+
+   窗口尺寸是固定的（展开态尺寸），**形态切换只改 CSS 类**，
+   不改窗口尺寸 —— 后者要走外壳，对高频动作太慢。 */
+body.widget {
+  /* 面板透明度：**只有外壳一个来源**（通过 URL 参数 → 内联样式写在根元素上）。
+     这里刻意**不写默认值** —— 写了就会在本元素上重新定义变量、
+     覆盖掉外壳给的值（实测踩到：外壳给 0.85，界面显示 0.82）。
+     缺值时的兜底在 .widget-bar 的 var() 回退参数里。 */
+  background: transparent;
+  margin: 0;
+  padding: 10px 10px 0;
+  font-size: 12px;
+  /* 组件整体不该能被选中文字：那是一块 UI，不是文档 */
+  user-select: none;
+  overflow: hidden;
+}
+
+.widget-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 4px 0 10px;
+  border-radius: 8px;
+  /* 底与字的对比度固定（--widget-bg），只有背景 alpha 随设置变。
+     var() 的回退值就是"外壳没给值"时的默认透明度。 */
+  background: rgba(var(--widget-bg, 28, 32, 38), var(--widget-alpha, 0.82));
+  backdrop-filter: blur(10px);
+  color: #e8eaed;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+}
+
+/* 焦点指示点：有焦点任务时点亮。一眼看出"我在做哪件" */
+.widget-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #6b7280;
+}
+body.has-focus .widget-dot { background: #4ade80; }
+
+.widget-task {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  /* 任务名可能很长：用省略号而不是换行 —— 换行会让细栏变成两行，破坏形态 */
+  text-overflow: ellipsis;
+}
+body.has-focus .widget-task { font-weight: 600; }
+
+.widget-counts { flex: 0 0 auto; display: flex; gap: 3px; }
+.widget-count {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.13);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.widget-count.zero { opacity: 0.4; }
+
+.widget-btn {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #9aa0a6;
+  /* V 形展开符号：用字符会比画 SVG 简单，也不需要额外请求。
+     字号调大让它看起来像箭头而不是逗号。 */
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.widget-btn:hover { background: rgba(255, 255, 255, 0.16); color: #fff; }
+
+/* 输入态：idle 时整行不占空间也不可见 */
+.widget-input-row {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(var(--widget-bg, 28, 32, 38), calc(var(--widget-alpha, 0.82) + 0.08));
+  backdrop-filter: blur(10px);
+  color: #e8eaed;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+}
+body.mode-input .widget-input-row { display: flex; }
+
+/* 输入态时**只**把展开按钮收起来 —— 它已经展开过了，留着会与「记下」混淆。
+   小条上的任务名与数字**保持不动**（用户要求）：
+   它顺带回答了"我在记到哪一件"，而原来那行"记到：…"正是干这个的。 */
+body.mode-input .widget-btn { display: none; }
+
+.widget-target {
+  flex: 0 0 auto;
+  max-width: 40%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #9aa0a6;
+}
+
+.widget-kind {
+  flex: 0 0 auto;
+  background: rgba(255, 255, 255, 0.1);
+  color: #e8eaed;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 5px;
+  padding: 3px 4px;
+  font-size: 12px;
+}
+.widget-kind option { background: #1c2026; color: #e8eaed; }
+
+/* 权重必须压过全局的 `input[type="text"]`。
+   那一条用的是**属性选择器**，算作 (0,1,1)，比单单一个类 `.widget-note` (0,1,0) **高** ——
+   因此**无论谁写在后面都是它赢**（实测：把本段整段移到文件末尾也无效）。
+   加上 `body.widget` 前缀凑到 (0,2,1) 才能稳定覆盖。
+
+   被它盖住时的表现：全局规则把背景设成 `--bg-raised`（浅色模式下是白色），
+   与这里的白字凑成**白字白底** —— "输入了却看不到字，连光标也看不见"。 */
+body.widget .widget-note {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 5px;
+  padding: 5px 8px;
+  color: #fff;
+  /* 光标颜色显式给：它默认跟随 color，color 一旦被别处盖成浅色，
+     光标就会在浅色底上"消失"。显式指定让它与文字一起稳定。 */
+  caret-color: #fff;
+  font-size: 12.5px;
+  user-select: text;
+}
+body.widget .widget-note:focus { outline: none; border-color: #4a9eff; }
+body.widget .widget-note::placeholder { color: #7b8188; }
+
+.widget-save {
+  flex: 0 0 auto;
+  border: none;
+  border-radius: 5px;
+  padding: 5px 11px;
+  background: #3b82f6;
+  color: #fff;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.widget-save:hover { background: #2f6feb; }
+.widget-save:disabled { opacity: 0.55; cursor: default; }
+
+.widget-error {
+  margin-top: 5px;
+  padding: 0 2px;
+  color: #fca5a5;
+  font-size: 11.5px;
+  min-height: 14px;
+}
+.widget-error.ok { color: #86efac; }
