@@ -325,17 +325,11 @@ body.capture {
   padding: 9px 11px;
 }
 
-.chips { display: flex; gap: 6px; margin: 8px 0 0; align-items: center; flex: 0 0 auto; }
-.chip {
-  border: 1px solid var(--border);
-  background: var(--bg-soft);
-  /* 方角比胶囊更接近 Windows 控件 */
-  border-radius: 4px;
-  padding: 3px 12px;
-  cursor: pointer;
-  color: var(--text-dim);
-}
-.chip.selected { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+/* 这里曾有 .chips / .chip 的样式（收件箱 / 资料 芯片）。
+   芯片已从快记窗删除 —— 详见 docs/requirements.md §4.6：
+   它承诺的"选中资料就存为资料"与 M1/M2 冲突，实际只是给收件箱条目打个标记，
+   选了也一样进收件箱。一个没有后果的选择只会让人犹豫，因此连样式一并删掉，
+   不留"看起来还在用"的死代码。 */
 
 /* 解析提示只占一行，没有内容时不占高度（min-height 让位置不跳动） */
 .parse-hint { min-height: 18px; font-size: 12px; margin-top: 4px; flex: 0 0 auto; }

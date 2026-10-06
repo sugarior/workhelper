@@ -5,16 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>快记 · WorkHelper</title>
   <!-- 样式与脚本都带版本参数：**缓存失效必须覆盖所有静态资源**。
-       此前只有 capture.js 带版本，于是改了 CSS 之后 WebView 仍用旧样式 ——
-       表现成"改了半天样式没生效"，而磁盘上的文件其实是新的（已用 CDP 查实）。 -->
-  <link rel="stylesheet" href="/app.css?v=0.12.0">
+       此前只有 capture.js 带版本，于是改了 CSS 之后 WebView 仍用旧样式。 -->
+  <link rel="stylesheet" href="/app.css?v=0.13.0">
 </head>
 <body class="capture">
   <!-- 标题栏。Windows 弹窗的形态标志不是"角落里有个关闭按钮"，
        而是**一条带标题的栏 + 右端方形关闭按钮** —— 没有它，浮窗看起来
-       像一段裸内容而不是一个窗口。 -->
+       像一段裸内容而不是一个窗口。
+       标题用「快记」而不是「记一句」：与功能名、主界面的「＋ 快记」按钮一致。 -->
   <div class="capture-titlebar">
-    <span class="capture-title">记一句</span>
+    <span class="capture-title">快记</span>
     <!-- 兜底关闭：浮窗没有系统标题栏，而"保存后自动收起"与 Esc 都依赖页面脚本；
          脚本一旦失效就没有任何关闭途径（实测遇到过一次，只能去杀进程）。 -->
     <button id="close" class="capture-close" title="关闭（Esc）" aria-label="关闭">✕</button>
@@ -22,16 +22,18 @@
 
   <div class="capture-card">
     <textarea id="text" class="capture-input" autofocus
-      placeholder="记一句…（Enter 保存，Shift+Enter 换行，Esc 取消）"></textarea>
+      placeholder="记一条到收件箱…（Enter 保存，Shift+Enter 换行，Esc 取消）"></textarea>
 
-    <div class="chips" id="chips" role="radiogroup" aria-label="记到哪里">
-      <button class="chip selected" data-kind="todo" role="radio" aria-checked="true">收件箱</button>
-      <button class="chip" data-kind="note" role="radio" aria-checked="false">资料</button>
-    </div>
-    <!-- 设计文档 §7.2 写的是三个芯片（收件箱/进展/资料），此处只有两个：
-         进展记录按数据模型必须挂在项目/任务/子任务上（CHECK 约束保证恰好挂一个），
-         而快记时还没有目标对象，因此"进展"不属于快记窗，它属于任务视图里的操作。
-         这一点已在设计文档中澄清。 -->
+    <!-- 这里曾有一组芯片（收件箱 / 资料），已删除。原因值得记下：
+         它承诺的事做不到 ——
+           规则 M1：资料**必须挂靠**到至少一个任务或项目
+           规则 M2：转资料时**必须选择目标**，绝不自动关联
+           而快记窗的前提是"不做二级选择、不弹出选择器"（需求 F-02）
+         于是"选中资料 → 直接生成资料"不可能：要么违反 M1/M2，要么违反 F-02。
+         芯片实际只是给收件箱条目打了个标记，**选了也一样进收件箱**。
+         一个没有后果的选择只会让人犹豫 —— 与需求 §6.2"永远不强迫我在记录时做决定"
+         正好相反，而且这一点已被实际使用确认（用户报告"选资料也进收件箱"）。
+         资料的入口仍在收件箱的「存为资料」，那条路本来就有目标选择器。 -->
 
     <div class="parse-hint" id="hint"></div>
 
@@ -42,6 +44,6 @@
     <div class="error-line" id="error"></div>
   </div>
 
-  <script type="module" src="/capture.js?v=0.12.0"></script>
+  <script type="module" src="/capture.js?v=0.13.0"></script>
 </body>
 </html>

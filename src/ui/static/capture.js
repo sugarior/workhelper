@@ -15,9 +15,22 @@ const hintBox = document.getElementById('hint');
 const errorBox = document.getElementById('error');
 const saveButton = document.getElementById('save');
 const closeButton = document.getElementById('close');
-const chipsBox = document.getElementById('chips');
 
-let kindHint = 'todo';
+/**
+ * 快记**只进收件箱**，因此没有"记到哪里"的选择。
+ *
+ * 曾经有一组芯片（收件箱 / 资料），已删除。原因是它承诺的事做不到，
+ * 而且那个承诺与另外两条硬规则直接冲突：
+ *   · 规则 M1：资料**必须挂靠**到至少一个任务或项目
+ *   · 规则 M2：转资料时**必须选择目标**，绝不自动关联
+ *   · 而快记窗的设计前提是"不做二级选择、不弹出选择器"（需求 F-02）
+ *
+ * 于是"选中资料 → 直接生成资料"是不可能的：要么违反 M1/M2，要么违反 F-02。
+ * 芯片实际只是给收件箱条目打了个标记，**选了也一样进收件箱** ——
+ * 一个没有后果的选择只会让人犹豫，与需求 §6.2"永远不强迫我在记录时做决定"相反。
+ *
+ * 资料的入口仍在收件箱的「存为资料」—— 那条路本来就有目标选择器。
+ */
 let parseTimer = null;
 /** 已保存就进入收尾流程，避免 Enter 与按钮双击造成重复写入 */
 let finished = false;
@@ -46,7 +59,7 @@ async function refreshHint() {
     return;
   }
   try {
-    const result = await api.quickCapture({ text, kindHint, dryRun: true });
+    const result = await api.quickCapture({ text, dryRun: true });
     if (finished) return;
     renderHint(result);
   } catch {
@@ -59,29 +72,6 @@ async function refreshHint() {
 textarea.addEventListener('input', () => {
   if (parseTimer !== null) clearTimeout(parseTimer);
   parseTimer = setTimeout(() => void refreshHint(), 180);
-});
-
-// ---------- 类型芯片（键盘可达，且不夺走输入框焦点）----------
-
-function selectKind(kind) {
-  kindHint = kind;
-  for (const chip of chipsBox.querySelectorAll('.chip')) {
-    const selected = chip.dataset.kind === kind;
-    chip.classList.toggle('selected', selected);
-    chip.setAttribute('aria-checked', String(selected));
-  }
-}
-
-chipsBox.addEventListener('click', (event) => {
-  const chip = event.target.closest('.chip');
-  if (chip !== null) selectKind(chip.dataset.kind);
-});
-
-// Tab 在三个区域间循环：输入框 → 芯片组 → 保存按钮
-chipsBox.addEventListener('keydown', (event) => {
-  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-  event.preventDefault();
-  selectKind(kindHint === 'todo' ? 'note' : 'todo');
 });
 
 // ---------- 保存与关闭 ----------
@@ -115,7 +105,7 @@ async function save() {
 
   saveButton.disabled = true;
   try {
-    await api.quickCapture({ text, kindHint });
+    await api.quickCapture({ text });
   } catch (error) {
     // 契约 3：失败时窗口不关闭，就地显示原因
     saveButton.disabled = false;
