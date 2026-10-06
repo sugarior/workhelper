@@ -117,7 +117,8 @@ fn spawn_kernel(repo_root: &Path) -> Result<Child, String> {
     println!("[shell] 仓库根    = {}", repo_root.display());
     println!("[shell] 内核入口  = {}", entry.display());
 
-    let child = Command::new(&node)
+    let mut command = Command::new(&node);
+    command
         .arg(&entry)
         .arg("--port")
         .arg(PORT.to_string())
@@ -131,7 +132,17 @@ fn spawn_kernel(repo_root: &Path) -> Result<Child, String> {
         .current_dir(repo_root)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+
+    // 请求日志开关：设 WORKHELPER_VERBOSE=1 启动外壳即可看到每个 API 请求。
+    // 排查"界面到底有没有连上内核"这类问题时，这是最直接的证据 ——
+    // 窗口标题、界面外观都区分不出"页面加载了"与"数据取到了"。
+    if std::env::var("WORKHELPER_VERBOSE").is_ok_and(|value| value == "1") {
+        command.arg("--verbose");
+        println!("[shell] 已开启内核请求日志（WORKHELPER_VERBOSE=1）");
+    }
+
+    let child = command
         .spawn()
         .map_err(|e| format!("启动 node 失败：{e}"))?;
 

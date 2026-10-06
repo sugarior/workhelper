@@ -293,12 +293,51 @@ WebView2 同样适用这条规则。做法：`src/ui/server.ts` 只对**自家�
 
 | 段 | 内容 | 验证方式 |
 | --- | --- | --- |
-| **B3-1** | 界面自带 + CORS + `api.js` 显式地址 | 浏览器里开发照旧；外壳里数据请求正常 |
+| **B3-1** ✅ | 界面自带 + CORS + `api.js` 运行时发现地址 | 见 §4.1.3 |
 | **B3-2** | 数据目录可配置，默认 `%APPDATA%` | `--data` 生效，`verify` 通过 |
 | **B3-3** | Node 随包 + 资源打包 + 启动自检 + 快记窗缺陷复验 | 见 §4.1.1 |
 | **B3-4** | 托盘 + 悬浮组件 + 开机自启（步 C） | 关窗口程序还在 |
 | **B3-5** | NSIS 安装包 | 产出 `.exe` 安装器 |
 | **B3-6** | 自包含验证（**不需要干净环境**） | 见 §4.1.1 |
+
+### 4.1.3 B3-1 实施记录（已完成并实测）
+
+**改动清单正好是预告的四层，一层不少**（这正是第二类错误要求的"清单动作"）：
+
+| 层 | 改动 |
+| --- | --- |
+| `tauri.conf.json` | 加 `build.frontendDist`，主窗口 `url` 从 `http://127.0.0.1:7317/` 改为 `index.html`（走应用协议） |
+| `src/ui/server.ts` | 加 CORS 头 + **OPTIONS 预检处理** + `/api-base` 端点 |
+| `src/ui/static/api.js` | 地址改为**运行时发现**，不再用相对路径 |
+| 静态资源路径 | **无需改动** —— 应用协议会**跳过开头的 `/`**，因此 `/app.js` 在两种加载方式下都正确 |
+
+**关键技术判断（已查源码确认）**：`/app.js` 这类绝对路径在应用协议下解析为
+`frontendDist` 根目录下的 `app.js`（asset.rs 里明确 `// skip leading /`），
+因此 HTML 一个字都不用改。这消除了"两种加载方式需要两套路径写法"的隐患。
+
+**端口只定义一处，前端运行时发现**：
+原本端口要在 `server.ts` 与外壳各写一份（改一处必漏一处 —— 第一类错误）。
+改为：前端先试**同源** `/api-base`（开发场景一次就成），
+失败再试候选地址（打包场景），拿到后缓存。`/api-base` 由内核返回**它自己实际监听的**地址。
+
+**实测证据**（开启内核请求日志 `WORKHELPER_VERBOSE=1`）：
+
+```
+GET     /api-base                      ← 前端发现 API 地址
+OPTIONS /api/capture/listPending       ← CORS 预检
+POST    /api/capture/listPending       ← 跨源数据请求成功
+OPTIONS /api/planning/listProjects  →  POST ...
+OPTIONS /api/tracking/focus         →  POST ...
+OPTIONS /api/tracking/openTasksView →  POST ...
+OPTIONS /api/system/trashOverview   →  POST ...
+```
+
+**验证方式的教训（第三类错误）**：最初想用"窗口标题是否变化"判断页面是否加载，
+但**外壳给窗口设的标题与页面 `<title>` 恰好相同**，这个观测点**区分不出**任何东西。
+改用"内核是否收到 API 请求"作为判据 —— 它同时证明了页面加载、地址发现、CORS、
+数据取回四件事，是真正决定性的证据。
+为此在外壳里加了 `WORKHELPER_VERBOSE=1` 开关，排查同类问题时可复用。
+
 
 ### 4.1.1 怎么验证"打包真的自包含"（不重开虚拟机/账户，不清 PATH）
 

@@ -15,6 +15,57 @@
 // 注意：**对象入参必须显式写出**（如 quickCapture(options)），
 // 因为对象在协议里表示"第一个参数就是这个对象"，规范化不会碰它。
 
+/**
+ * API 的基地址。
+ *
+ * **为什么需要它**：打包后界面由 Tauri 的应用协议提供，而 API 仍是 Node 的
+ * `http://127.0.0.1:<port>` —— 两者**不同源**，相对路径 `/api/...` 会打到应用协议上，
+ * 所有数据请求 404。表现为"界面能打开但一片空白"。
+ *
+ * **端口只在内核里定义一次（`server.ts` 的 `DEFAULT_PORT`），这里不写死第二份** ——
+ * 否则改端口时必然只改一处（第一类错误：同一规则写在两处，必然背离）。
+ * 前端改为**运行时发现**：
+ *   1. 同源就是 API（浏览器里直接开 `http://127.0.0.1:7317`，界面与 API 同源）
+ *   2. 否则问内核要一次地址（`GET /api-base`），拿到就缓存
+ *
+ * 探路用的候选地址只在第 2 步用一次，且仅在"界面与 API 不同源"时才会走到 ——
+ * 那是打包后的场景，而端口已确认固定不变（见 plan §4.1.2）。
+ */
+let apiBasePromise = null;
+
+async function resolveApiBase() {
+  const sameOrigin = location.origin;
+  // 同源探测：开发时（浏览器直接开 7317）走这条，一次就成
+  try {
+    const probe = await fetch(`${sameOrigin}/api-base`, { cache: 'no-store' });
+    if (probe.ok) {
+      const data = await probe.json();
+      if (typeof data?.base === 'string' && data.base.length > 0) return data.base;
+    }
+  } catch {
+    // 同源不是 API（打包后就是这种情况），继续往候选地址试
+  }
+
+  for (const candidate of ['http://127.0.0.1:7317']) {
+    try {
+      const probe = await fetch(`${candidate}/api-base`, { cache: 'no-store' });
+      if (!probe.ok) continue;
+      const data = await probe.json();
+      if (typeof data?.base === 'string' && data.base.length > 0) return data.base;
+    } catch {
+      // 换下一个候选
+    }
+  }
+
+  // 都失败就退回同源：让后续请求给出真实错误，而不是在这里抛一个看不懂的异常
+  return sameOrigin;
+}
+
+function apiBase() {
+  apiBasePromise ??= resolveApiBase();
+  return apiBasePromise;
+}
+
 /** 调用一个服务方法。失败时抛出带有后端可读消息的错误。 */
 export async function call(service, method, params) {
   const normalized =
@@ -22,7 +73,8 @@ export async function call(service, method, params) {
       : Array.isArray(params) ? params
         : [params];
 
-  const response = await fetch(`/api/${service}/${method}`, {
+  const base = await apiBase();
+  const response = await fetch(`${base}/api/${service}/${method}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ params: normalized }),

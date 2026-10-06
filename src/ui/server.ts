@@ -86,9 +86,32 @@ const ALLOWED: Readonly<Record<string, readonly string[]>> = {
     'trashOverview', 'restoreIgnored', 'purgeIgnored', 'restoreTrash', 'purgeTrash'],
 };
 
+/**
+ * 打包后界面与 API **不同源**，必须放行 CORS。
+ *
+ * | | 来源 |
+ * | --- | --- |
+ * | 界面（打包后） | Tauri 的应用协议 |
+ * | API（始终） | `http://127.0.0.1:<port>` |
+ *
+ * 浏览器规则要求跨源请求由服务端返回 CORS 头，WebView2 同样适用。
+ * 不加的后果是**所有数据请求被拒**，而界面本身能打开 —— 表现为"界面是空的"。
+ *
+ * **为什么放行全部来源而不是白名单**：服务只监听 `127.0.0.1`，
+ * 外部本来就不可达；能发起请求的只有本机进程。加白名单会引入
+ * "Tauri 在各平台的源不同"这种平台细节，收益为零、维护成本却真实存在。
+ * 这与"本地服务也要有基本防线"不冲突 —— 那道防线是**只绑回环地址**。
+ */
+const CORS_HEADERS: Readonly<Record<string, string>> = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'POST, GET, OPTIONS',
+  'access-control-allow-headers': 'content-type',
+};
+
 function sendJson(response: ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload);
   response.writeHead(status, {
+    ...CORS_HEADERS,
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(body),
     'cache-control': 'no-store',
@@ -97,7 +120,7 @@ function sendJson(response: ServerResponse, status: number, payload: unknown): v
 }
 
 function sendText(response: ServerResponse, status: number, text: string): void {
-  response.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
+  response.writeHead(status, { ...CORS_HEADERS, 'content-type': 'text/plain; charset=utf-8' });
   response.end(text);
 }
 
@@ -153,6 +176,7 @@ function serveStatic(response: ServerResponse, filePath: string): void {
     // 本地服务重校验几乎无成本，却能避免"改了前端代码、浏览器还在跑旧版"
     // 这类极难定位的问题——本项目已经因此被误导过一次。
     'cache-control': 'no-cache',
+    ...CORS_HEADERS,
   });
   response.end(body);
 }
@@ -213,8 +237,29 @@ export function createAppServer(options: ServerOptions): Server {
 
     if (log) console.log(`${request.method ?? 'GET'} ${pathname}`);
 
+    // CORS 预检：`content-type: application/json` 的 POST 属"非简单请求"，
+    // 浏览器会先发 OPTIONS 问一句。不回应它，正式请求根本不会发出 ——
+    // 表现为所有数据请求静默失败。不需要带 body，也不该走白名单校验。
+    if (request.method === 'OPTIONS') {
+      response.writeHead(204, { ...CORS_HEADERS, 'content-length': 0 });
+      response.end();
+      return Promise.resolve();
+    }
+
     if (pathname.startsWith('/api/')) {
       return handleApi(request, response, svc, pathname);
+    }
+
+    /**
+     * 告诉前端"API 在哪"。
+     *
+     * 打包后界面由 Tauri 的应用协议提供、API 在本地 HTTP 服务上，**两者不同源**，
+     * 前端无法用相对路径找到 API。与其把端口写死两份（改一处必漏一处），
+     * 不如让服务自己报出来 —— **端口只在本文件顶部定义一次**。
+     */
+    if (pathname === '/api-base') {
+      sendJson(response, 200, { base: `http://127.0.0.1:${port}` });
+      return Promise.resolve();
     }
 
     if (request.method !== 'GET' && request.method !== 'HEAD') {
