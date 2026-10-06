@@ -1,4 +1,4 @@
-//! 工作秘书的桌面外壳（实验 B2-a）。
+﻿//! 工作秘书的桌面外壳（实验 B2-a）。
 //!
 //! 这一版**只做一件事**：验证 Tauri 能否可靠地
 //!   1. 找到 node 可执行文件
@@ -209,64 +209,42 @@ const HOTKEY: &str = "ctrl+alt+Space";
 /// 快记窗的标签。用它判断窗口是否已存在（复用而不是每次新建）。
 const CAPTURE_LABEL: &str = "capture";
 
-/// 关闭信号的约定值：写进 DOM 标题，由外壳读回。
-const CLOSE_SENTINEL: &str = "wh-closing";
-
-/// 探测脚本：把"要不要关"的答案写进 `document.title`。
+/// 注入脚本：把网页里的 `window.close()` 接到"隐藏窗口"上。
 ///
-/// **为什么用改 DOM 再读回，而不是 `eval_with_callback` 回传**：
-/// 实测回调时序靠不住 —— 同一个表达式在窗口刚建好时回调不触发（读到空值），
-/// 4 秒后才正常返回。而 `window.title()` 是同步可读的，不依赖回调。
+/// **为什么需要它**：`capture.js` 保存成功后调用 `window.close()` —— 那在浏览器里是对的
+/// （它的注释也写着"只有由脚本打开的窗口才允许被脚本关闭"），
+/// **但 Tauri 的 WebView 不认这条**：窗口不是 `window.open()` 开的，于是它是空操作。
 ///
-/// **为什么不用 `window.close` 替身**：那需要在页面加载**之前**完成替换，
-/// 而"什么时候算加载完"在这个窗口上不好判断（实测立即 eval 会静默空操作）。
-/// 读 DOM 状态则天然发生在页面就绪之后，先后顺序不需要猜。
+/// 后果很难查：`closeWindow()` 已经先加了 `.closing`（透明度动画、`forwards` 保持），
+/// 窗口永远停在"透明"状态 —— 用户看到的是**黑屏**（空窗口的默认底色）。
 ///
-/// **界面代码一行不改**：`capture.js` 保存后本来就会加 `.closing`（收起动画），
-/// 这里只是观察它。
-const PROBE_SCRIPT: &str = r#"
+/// **为什么现在这条路能成**：注入要求 `__TAURI_INTERNALS__` 可用，而它只在
+/// **应用协议**的页面上被注入。此前快记窗用 `WebviewUrl::External`（http 外部地址），
+/// 实测 eval 调用返回 Ok 但实际不执行、回调不触发 —— 试过三种方案全部静默失败。
+/// B3-4 把快记窗改走 `WebviewUrl::App`，与主窗口同一条加载路径
+/// （主窗口的 JS 通道一直是正常的，这是选择这条路线的依据）。
+///
+/// 用 `hide()` 而不是 `close()`：窗口留着，下次热键唤出只需 `show()`，
+/// 不必再付一次 WebView2 初始化（创建 380ms → 复用 55ms）。
+const CLOSE_SHIM: &str = r#"
 (() => {
-  if (!window.__whClosed && document.body && document.body.classList.contains('closing')) {
-    window.__whClosed = true;
-    document.title = 'wh-closing';
-  }
-  return document.title;
+  const internals = window.__TAURI_INTERNALS__;
+  if (!internals || typeof internals.invoke !== 'function') return;
+  const invoke = internals.invoke.bind(internals);
+  window.close = () => { invoke('hide_capture_window').catch(() => {}); };
 })();
 "#;
 
-/// 快记窗关闭：轮询页面状态，看到收起动画就隐藏窗口。
-///
-/// **背景**：`capture.js` 靠 `window.close()` 收窗，而 Tauri 的 WebView 不认这句
-/// （窗口不是 `window.open()` 开的）—— 于是它停在被 `.closing` 设成透明的状态，
-/// 用户看到的是**黑屏**（空窗口的默认底色）。
-///
-/// 用 `hide()` 而不是 `close()`：窗口留着，下次热键唤出只需 `show()`，
-/// 不必再付一次 WebView2 初始化（创建 434ms → 复用 55ms）。
-fn watch_capture_close(window: tauri::WebviewWindow) {
-    std::thread::spawn(move || {
-        // 先等页面加载完再开始探测：太早的 eval 是无声的空操作（实测）
-        std::thread::sleep(Duration::from_millis(1500));
-
-        loop {
-            std::thread::sleep(Duration::from_millis(200));
-            if !matches!(window.is_visible(), Ok(true)) {
-                continue;
-            }
-
-            let _ = window.eval(PROBE_SCRIPT);
-            std::thread::sleep(Duration::from_millis(120));
-
-            if window.title().unwrap_or_default().contains(CLOSE_SENTINEL) {
-                println!("[shell] 检测到快记窗已保存，隐藏它");
-                let _ = window.hide();
-                // 复位，供下次唤出继续使用
-                let _ = window.eval("window.__whClosed = false; document.title = '快记 · WorkHelper';");
-            }
-        }
-    });
+/// 隐藏快记窗（由页面里的 `window.close()` 替身调用）。
+#[tauri::command]
+fn hide_capture_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.hide().map_err(|e| e.to_string())
 }
 
-/// 打开快记窗：不存在就建（注入关闭替身），存在就显示。
+/// 打开快记窗：不存在就建（走应用协议 + 注入关闭替身），存在就显示。
+///
+/// **必须走应用协议**（`WebviewUrl::App`）而不是外部 http 地址 ——
+/// 后者没有 Tauri 的 JS 通道，`window.close` 替身注入不进去（见 `CLOSE_SHIM` 的说明）。
 fn open_capture_window(app: &tauri::AppHandle) {
     let began = Instant::now();
 
@@ -277,40 +255,38 @@ fn open_capture_window(app: &tauri::AppHandle) {
         return;
     }
 
-    let url = format!("http://127.0.0.1:{PORT}/capture");
-    let parsed = match url.parse::<tauri::Url>() {
-        Ok(value) => value,
-        Err(error) => {
-            // 端口是常量，这里失败只可能是代码写错 —— 说出来而不是静默无反应
-            eprintln!("[shell] ✗ 快记窗地址非法（{url}）：{error}");
-            return;
-        }
-    };
-
-    let built = tauri::WebviewWindowBuilder::new(app, CAPTURE_LABEL, tauri::WebviewUrl::External(parsed))
-        .title("快记")
-        .inner_size(680.0, 330.0)
-        // 浮窗形态（需求 §6.1）：无边框、置顶、不进任务栏
-        .decorations(false)
-        .always_on_top(true)
-        .resizable(false)
-        .center()
-        .skip_taskbar(true)
-        // 窗口底色跟随界面，避免加载瞬间闪一下系统默认的黑/灰
-        .background_color(tauri::window::Color(245, 246, 248, 255))
-        // 关键：在页面脚本之前把 window.close 换掉
-        .build();
+    // `capture.html` 由应用协议从 frontendDist 根提供。
+    // 页面里的 `/app.css`、`/capture.js` 是绝对路径，而应用协议会跳过开头的 `/`
+    // （tauri/src/protocol/asset.rs 里明确 `// skip leading /`），因此能正确解析 ——
+    // 同一套 HTML 在 HTTP 下（浏览器开发）与这里都能用，不需要两套路径写法。
+    let built = tauri::WebviewWindowBuilder::new(
+        app,
+        CAPTURE_LABEL,
+        tauri::WebviewUrl::App("capture.html".into()),
+    )
+    .title("快记")
+    .inner_size(680.0, 330.0)
+    // 浮窗形态（需求 §6.1）：无边框、置顶、不进任务栏
+    .decorations(false)
+    .always_on_top(true)
+    .resizable(false)
+    .center()
+    .skip_taskbar(true)
+    // 窗口底色跟随界面，避免加载瞬间闪一下系统默认的黑/灰
+    .background_color(tauri::window::Color(245, 246, 248, 255))
+    // 关键：在页面脚本之前把 window.close 换掉。
+    // 必须早于 `capture.js` 执行，否则它可能已经取得原生引用。
+    .initialization_script(CLOSE_SHIM)
+    .build();
 
     match built {
         Ok(window) => {
             let _ = window.set_focus();
-            watch_capture_close(window.clone());
             println!("[shell] 快记窗首次创建，耗时 {} ms", began.elapsed().as_millis());
         }
         Err(error) => eprintln!("[shell] ✗ 创建快记窗失败：{error}"),
     }
 }
-
 /// 应用名，用于 `%APPDATA%` 下的目录名与配置文件位置。
 const APP_DIR_NAME: &str = "WorkHelper";
 
@@ -524,6 +500,7 @@ fn main() {
         .build();
 
     let app = builder
+        .invoke_handler(tauri::generate_handler![hide_capture_window])
         .setup(move |app| {
             println!(
                 "[shell] 应用就绪，从进程启动算起 {} ms",

@@ -1,6 +1,6 @@
-[package]
+﻿[package]
 name = "workhelper-shell"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "工作秘书的桌面外壳：拉起 Node 内核、注册全局热键、承载界面"
 # 外壳是二进制 crate，不对外暴露库接口
