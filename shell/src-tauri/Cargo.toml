@@ -10,7 +10,11 @@ publish = false
 tauri-build = { version = "2.7.1", features = [] }
 
 [dependencies]
-tauri = { version = "2.12.1", features = [] }
+# 两个 feature 都是**必须显式开启的**：
+#   · `tray-icon` —— 需求 F-16 的系统托盘。不开的话 `TrayIconBuilder` 根本不存在。
+#   · `image-png` —— 托盘图标是 PNG，`Image::from_bytes` 需要它才能解码。
+# 不开的后果都是**编译期就报找不到**，因此不存在"忘了开却静默不工作"的风险。
+tauri = { version = "2.12.1", features = ["tray-icon", "image-png"] }
 # 全局快捷键（实验 B2-b 用）
 tauri-plugin-global-shortcut = "2.4.0"
 # 在 PATH 里找 node。自己解析 PATH 要处理 .exe/.cmd、PATHEXT、大小写等一堆细节，

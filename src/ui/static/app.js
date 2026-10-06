@@ -273,93 +273,60 @@ function focusNoteFromShortcut() {
 }
 
 /**
- * 桌面壳里的全局热键（F-15c）通过**标记 + 轮询**通知本页面。
+ * 托盘要求主窗口切到某一页（F-16 的「今日」「收件箱」「设置」）。
  *
- * **与上面那段键盘监听的分工**：
- *   · 页面有焦点时 —— 页面自己的监听就够，不需要外壳参与
- *   · 页面没焦点时 —— 只有外壳的全局热键能收到，它把窗口带到前面并置一个标记
- * 两条路最后都调用同一个 `focusNoteFromShortcut()`，
- * **不是两套功能**（需求 F-15c 的原话："同一个动作的两个位置"）。
- *
- * **为什么是轮询而不是事件**：页面侧唯一被实测证明可靠的 Tauri 能力是 `invoke`
- * （命令调用）；事件插件在 `__TAURI_INTERNALS__` 上的调用形态没有验证过，
- * 而本项目已经因为"没验证就下手"在快记窗上耗过很久。这里只走 `invoke` 一条路。
- *
- * **轮询只在窗口有焦点时进行** —— 没焦点时按热键，外壳会把窗口带到前面，
- * 随之触发 focus 事件开始轮询。因此空转极少（每 200ms 一次本地命令调用）。
+ * **与 `take_main_refresh` 共用同一个轮询循环**（见 `startShellPolling`）：
+ * 两者都是"外壳有话要对主窗口说"，分成两个 200ms 定时器没有意义，
+ * 而且两处各自维护启停状态只会增加出错面。
  */
-let notePoller = null;
-
-function startNotePolling() {
-  const internals = globalThis.__TAURI_INTERNALS__;
-  if (!internals || typeof internals.invoke !== 'function' || notePoller !== null) return;
-  notePoller = setInterval(() => {
-    void (async () => {
-      try {
-        // 外壳取值即清零，因此一次按键只会被取走一次
-        if (await internals.invoke('take_note_request')) await acceptNoteRequest();
-      } catch {
-        // 取不到就跳过这一轮：这不是用户可见的功能，不该因为一次失败就弹错
-      }
-    })();
-  }, 200);
-}
-
-function stopNotePolling() {
-  if (notePoller === null) return;
-  clearInterval(notePoller);
-  notePoller = null;
-}
-
-/**
- * 热键生效：把焦点放进「记一笔」输入框。
- *
- * **必须先刷新再聚焦**：`window` 的 focus 事件会触发整页重绘，
- * 而重绘会把焦点条的输入框换成新元素 —— 这时旧的引用已经不在文档里，
- * 聚焦它等于没聚焦（用户看到"按了热键但光标不在输入框"）。
- */
-async function acceptNoteRequest() {
-  stopNotePolling();
-  await refresh();
-  const ok = focusNoteFromShortcut();
-  const internals = globalThis.__TAURI_INTERNALS__;
-  // 回话让外壳知道结果。失败不影响用户 —— 提示已经由 focusNoteFromShortcut 显示。
-  try {
-    await internals.invoke('report_note_result', { accepted: ok });
-  } catch {
-    // 静默：这只是外壳侧的日志
+async function acceptPendingTab() {
+  const tab = await invokeShell('take_pending_tab');
+  if (typeof tab !== 'string' || tab === '') return;
+  // 未知页签说明外壳与页面对不上（例如设置页还没做）。
+  // **不静默忽略**：否则表现成"从托盘点设置没反应"（F-05 要避免的形态）。
+  if (RENDERERS[tab] === undefined) {
+    flash(`还没有「${tab}」这一页 —— 该功能尚未实现`, 'error');
+    return;
   }
+  await render(tab);
 }
 
 // 页面重新获得焦点时刷新，这样从快记窗回来就能看到新记录。
-// 顺带开始轮询「记一笔」热键标记 —— 外壳正是把窗口带到前面来通知我们的。
-window.addEventListener('focus', () => {
-  void refresh();
-  startNotePolling();
-});
-window.addEventListener('blur', stopNotePolling);
+// **不再顺带启停轮询**：外壳的话什么时候都可能来（从托盘点菜单时窗口正是隐藏的），
+// 因此轮询常驻（见下方 startShellPolling）。
+window.addEventListener('focus', () => void refresh());
 
 /**
- * 轮询"外面改了数据、该重画了"的标记。
+ * 轮询外壳对主窗口说的话。
  *
- * **为什么需要它**：悬浮组件里也能改焦点（点小条上的任务名切换）——
+ * **两件事共用一个循环**：数据变了该重画、托盘要求切页签。
+ * 它们都是"外壳有话要说"，拆成两个 200ms 定时器没有意义，
+ * 而且两处各自维护启停状态只增加出错面。
+ *
+ * **为什么需要"该重画了"**：悬浮组件里也能改焦点（点小条上的任务名切换）——
  * 那之后主界面顶部的聚焦条仍显示旧任务，两处就不一致了。
- * 依赖 `window.focus` 刷新解决不了：窗口可能**本来就是**聚焦的，那种情况下
- * focus 事件不会再触发。
+ * 依赖 `window.focus` 刷新解决不了：窗口可能**本来就是**聚焦的，
+ * 那种情况下 focus 事件不会再触发。
+ *
+ * **为什么轮询常驻、不再随窗口焦点启停**（原来的做法）：
+ * 从托盘点「今日」时主窗口**正是隐藏的**，若轮询只在有焦点时跑，
+ * 那条指令就会一直躺在那里没人取 —— 表现成"点了托盘菜单没反应"。
+ * 代价是每 200ms 两次本地命令调用，可以忽略。
  */
-let mainPoller = null;
+let shellPoller = null;
 
-function startMainPolling() {
-  if (!inShell() || mainPoller !== null) return;
-  mainPoller = setInterval(() => {
+function startShellPolling() {
+  if (!inShell() || shellPoller !== null) return;
+  shellPoller = setInterval(() => {
     void (async () => {
+      // 顺序有讲究：先处理"切页签"（那是用户明确的动作），
+      // 再处理"重画"（后台数据变化）。反过来会先重画一次当前页、再切走，白画一次。
+      await acceptPendingTab();
       if (await invokeShell('take_main_refresh')) await refresh();
     })();
   }, 200);
 }
 
-// 窗口一开始就是聚焦的，因此启动时也要轮询（只靠 focus 事件会漏掉首次）
-startNotePolling();
-startMainPolling();
+startShellPolling();
 
 void render('inbox');

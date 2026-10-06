@@ -413,6 +413,12 @@ enum WidgetCommand {
     /// 只重画数据，不动形态（焦点变了、数据变了）
     Refresh,
     /// 当前没有焦点任务，请页面弹出"选一个焦点"
+    ///
+    /// **当前没有调用方**：页面自己会判断（有焦点 → 进输入态；没焦点 → 弹选焦点），
+    /// 因此外壳不需要发这条指令。保留它是为了让"外壳主动要求页面进选焦点态"
+    /// 这条路随时可用 —— 例如将来加"从托盘直接换焦点"。
+    /// 删掉再回来加，成本比留着一个有注释的枚举值高。
+    #[allow(dead_code)]
     PickFocus,
 }
 
@@ -509,6 +515,182 @@ fn report_note_result(accepted: bool) {
 
 /// 悬浮小组件的窗口标签。
 const WIDGET_LABEL: &str = "widget";
+
+/// 托盘菜单项 id。**用常量而不是散落的字符串字面量**：
+/// 菜单的构造与事件处理两处都要用它们，写字面量迟早拼错一处 ——
+/// 而拼错的后果是"点了没反应"，那是最难排查的形态（需求 F-05 的教训）。
+mod tray_id {
+    pub const CAPTURE: &str = "wh-capture";
+    pub const TODAY: &str = "wh-today";
+    pub const INBOX: &str = "wh-inbox";
+    pub const PAUSE_REMIND: &str = "wh-pause-remind";
+    pub const TOGGLE_WIDGET: &str = "wh-toggle-widget";
+    pub const SETTINGS: &str = "wh-settings";
+    pub const QUIT: &str = "wh-quit";
+}
+
+/// 构建托盘菜单。
+///
+/// **"显示/隐藏悬浮组件"的文案随当前状态变**：菜单要打开时才构建，
+/// 因此每次都能反映真实状态。写死"隐藏"而组件已经是隐藏的，会让人困惑。
+fn build_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>, String> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+
+    let widget_visible = app
+        .try_state::<ShellState>()
+        .map(|state| state.config.lock().expect("锁被污染").widget_visible)
+        .unwrap_or(true);
+
+    let item = |id: &str, text: &str| {
+        MenuItemBuilder::with_id(id, text)
+            .build(app)
+            .map_err(|e| format!("构建菜单项 {id} 失败：{e}"))
+    };
+
+    let capture = item(tray_id::CAPTURE, "快记")?;
+    let today = item(tray_id::TODAY, "今日")?;
+    let inbox = item(tray_id::INBOX, "收件箱")?;
+    // 需求 F-16 原文有这一项，但**提醒功能（F-22/F-23）尚未实现**。
+    // 处置：显示但**置灰**，文案里说明原因 ——
+    // 比"先不放"更容易解释（用户对照需求会发现少了东西），
+    // 也比"放了但点了没反应"好（那违反 F-05）。
+    let pause = MenuItemBuilder::with_id(tray_id::PAUSE_REMIND, "暂停提醒（功能尚未实现）")
+        .enabled(false)
+        .build(app)
+        .map_err(|e| format!("构建菜单项失败：{e}"))?;
+    let toggle_widget = item(
+        tray_id::TOGGLE_WIDGET,
+        if widget_visible { "隐藏悬浮组件" } else { "显示悬浮组件" },
+    )?;
+    let settings = item(tray_id::SETTINGS, "设置…")?;
+    let quit = item(tray_id::QUIT, "退出")?;
+    let sep1 = PredefinedMenuItem::separator(app).map_err(|e| format!("构建分隔线失败：{e}"))?;
+    let sep2 = PredefinedMenuItem::separator(app).map_err(|e| format!("构建分隔线失败：{e}"))?;
+
+    MenuBuilder::new(app)
+        .items(&[
+            &capture,
+            &today,
+            &inbox,
+            &pause,
+            &sep1,
+            &toggle_widget,
+            &settings,
+            &sep2,
+            &quit,
+        ])
+        .build()
+        .map_err(|e| format!("构建托盘菜单失败：{e}"))
+}
+
+/// 创建系统托盘（需求 F-16）。
+fn create_tray(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::tray::TrayIconBuilder;
+
+    let menu = build_tray_menu(app)?;
+
+    TrayIconBuilder::with_id("wh-tray")
+        // 图标从编译期嵌入的字节解码：**不依赖运行时的文件路径** ——
+        // 打包后图标在资源里，写路径就得处理开发态/打包态两种位置。
+        .icon(
+            tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))
+                .map_err(|e| format!("托盘图标解码失败：{e}"))?,
+        )
+        .tooltip("工作秘书")
+        .menu(&menu)
+        // 左键单击也弹菜单：Windows 上左键单击托盘图标弹菜单是常见预期，
+        // 而"左键单击做别的事、右键弹菜单"会让人以为左键没反应。
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| handle_tray_menu(app, event.id().as_ref()))
+        .build(app)
+        .map_err(|e| format!("构建托盘失败：{e}"))?;
+
+    println!("[shell] 系统托盘已就绪");
+    Ok(())
+}
+
+/// 托盘菜单点击处理。
+///
+/// **每个分支都要有可见结果**：点了没反应是最难排查的形态（F-05）。
+/// 因此"设置"这类还没做的功能，也明确说一句，而不是静默返回。
+fn handle_tray_menu(app: &tauri::AppHandle, id: &str) {
+    match id {
+        tray_id::CAPTURE => open_capture_window(app),
+        tray_id::TODAY => show_main_window(app, Some("today")),
+        tray_id::INBOX => show_main_window(app, Some("inbox")),
+        // 置灰项在正常路径下点不到；万一被系统触发，也说清楚而不是静默
+        tray_id::PAUSE_REMIND => println!("[shell] 暂停提醒：功能尚未实现"),
+        tray_id::TOGGLE_WIDGET => {
+            let current = app
+                .try_state::<ShellState>()
+                .map(|state| state.config.lock().expect("锁被污染").widget_visible)
+                .unwrap_or(true);
+            set_widget_visible(app, !current);
+            // 菜单文案要跟着变，因此重建一次
+            refresh_tray_menu(app);
+        }
+        tray_id::SETTINGS => show_main_window(app, Some("settings")),
+        tray_id::QUIT => {
+            println!("[shell] 从托盘退出");
+            // 走正常退出流程，让 `app.run` 的收尾逻辑收掉内核子进程
+            app.exit(0);
+        }
+        other => eprintln!("[shell] ✗ 未知的托盘菜单项：{other}"),
+    }
+}
+
+/// 重建托盘菜单，让"显示/隐藏悬浮组件"的文案与真实状态一致。
+fn refresh_tray_menu(app: &tauri::AppHandle) {
+    let Ok(menu) = build_tray_menu(app) else {
+        return;
+    };
+    if let Some(tray) = app.tray_by_id("wh-tray") {
+        let _ = tray.set_menu(Some(menu));
+    }
+}
+
+/// 显示主窗口，必要时切到指定页签。
+///
+/// **切页签靠"通知页面"而不是直接改页面**：外壳碰不到页面里的模块状态。
+/// 复用已有的 `MainRefreshRequest` 那套"置标记 + 页面轮询"机制，
+/// 但要多带一个"切到哪一页"的信息 —— 因此这里用**独立的待切页签标记**。
+fn show_main_window(app: &tauri::AppHandle, tab: Option<&str>) {
+    use tauri::Manager;
+
+    let Some(window) = app.get_webview_window("main") else {
+        eprintln!("[shell] ✗ 找不到主窗口");
+        return;
+    };
+    // 窗口可能被"关闭主窗口不退出"藏起来了
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+
+    if let Some(tab) = tab {
+        if let Some(slot) = app.try_state::<PendingTab>() {
+            if let Ok(mut guard) = slot.0.lock() {
+                *guard = Some(tab.to_string());
+            }
+        }
+    }
+}
+
+/// 托盘要求主窗口切到的页签；页面轮询取走。
+///
+/// 用 `Mutex<Option<String>>` 而不是几个 `AtomicBool`：
+/// 页签是**会增长的一组值**，用布尔量表示就得每加一页加一个标志位 ——
+/// 那正是"漏了同步扩展"的温床。
+struct PendingTab(std::sync::Mutex<Option<String>>);
+
+/// 页面调用：取走"该切到哪一页"的请求；返回空串表示没有。
+#[tauri::command]
+fn take_pending_tab(state: tauri::State<'_, PendingTab>) -> String {
+    let mut guard = match state.0.lock() {
+        Ok(guard) => guard,
+        Err(_) => return String::new(),
+    };
+    guard.take().unwrap_or_default()
+}
 
 /// 应用名，用于 `%APPDATA%` 下的目录名与配置文件位置。
 const APP_DIR_NAME: &str = "WorkHelper";
@@ -915,6 +1097,10 @@ enum Json {
     Bool(bool),
     Number(f64),
     Str(String),
+    /// 数组。**当前配置里没有数组字段**，但解析器要完整：
+    /// 用户手写的 config.json 未来可能加数组，而"遇到数组就报错"
+    /// 会让一个格式正确的文件被判成损坏。保留它比事后回来补便宜。
+    #[allow(dead_code)]
     Array(Vec<Json>),
     Object(Vec<(String, Json)>),
 }
@@ -1293,7 +1479,10 @@ fn main() {
             report_note_result,
             collapse_widget,
             save_widget_position,
+            take_pending_tab,
         ])
+        // 托盘要求主窗口切到的页签（页面轮询取走）。
+        .manage(PendingTab(std::sync::Mutex::new(None)))
         // 悬浮组件的指令槽（进入输入 / 重画 / 选焦点）。
         .manage(WidgetCommandSlot::new())
         // "主界面该重画了"的标记（悬浮组件改了数据时置位）。
@@ -1318,6 +1507,14 @@ fn main() {
             // 关闭替身由 WebviewWindowBuilder 的 initialization_script 注入
             // （见 open_capture_window 的说明）—— 必须早于页面脚本，
             // 因此不能放在这里 eval。
+
+            // 系统托盘（需求 F-16）。**它是"常驻桌面"这个形态的关键一环**：
+            // 没有它，"关闭主窗口不退出进程"就无从谈起。
+            if let Err(error) = create_tray(app.handle()) {
+                // 建不出来不该让整个程序起不来：主窗口、热键、悬浮组件都还能用，
+                // 只是没有托盘入口。必须说出来 —— 否则用户会以为托盘坏了。
+                eprintln!("[shell] ✗ 创建系统托盘失败：{error}");
+            }
 
             // 悬浮组件（需求 F-17）：**默认常驻显示**（用户确认），
             // 位置取上次拖动保存的坐标。
@@ -1383,6 +1580,24 @@ fn main() {
                         if let Some(state) = app_handle.try_state::<WidgetMoveSaver>() {
                             state.0.store(true, std::sync::atomic::Ordering::SeqCst);
                         }
+                    }
+
+                    // 关闭主窗口 = **收进托盘，不退出进程**（需求 F-16 的验收标准）。
+                    //
+                    // **这是托盘存在的核心意义**：它是"常驻桌面"这个形态的落点。
+                    // 不拦这一步的话，点 × 就把整个程序（含内核与悬浮组件）结束了，
+                    // 托盘图标也跟着消失 —— 那托盘就白做了。
+                    //
+                    // 真正退出走托盘菜单的「退出」。
+                    //
+                    // **必须 `prevent_close()`**：Tauri 默认在最后一个窗口关闭时
+                    // 结束应用（ExitRequested），只 `hide()` 不拦截的话进程照样退出。
+                    WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.hide();
+                        }
+                        println!("[shell] 主窗口已收进托盘（从托盘菜单可退出）");
                     }
 
                     // 悬浮组件失焦：**只在输入态才收起**。
