@@ -838,17 +838,59 @@ fn apply_shell_settings(app: &tauri::AppHandle) {
         } else {
             let _ = window.hide();
         }
-    }
-    // 不透明度是**页面侧**的 CSS 变量（窗口级透明度 Tauri 2 不支持），
-    // 因此要请页面重画 —— 而复用已有的指令通道，不新增通信方式。
-    if let Some(slot) = app.try_state::<WidgetCommandSlot>() {
-        slot.put(WidgetCommand::Refresh);
+
+        // 不透明度的生效方式：**更新窗口 URL 并导航**。
+        //
+        // 页面的不透明度来自 URL 参数（`widget.html?opacity=…`），那是**唯一来源**。
+        // 因此改它就要改 URL —— 若改用"给页面发一条带值的新指令"，
+        // 就变成"URL 一份、指令一份"，两处迟早不一致（第一类错误的典型形态）。
+        //
+        // **曾经这里是发一条 `Refresh`**：那条指令只重画数据，
+        // **根本不会碰不透明度** —— 于是拖动滑块看不出变化（用户报告
+        // "不透明度调整不明显或不生效"）。
+        //
+        // 用导航而不是 `eval("location.reload()")`：本次改动要改变 URL 本身
+        // （查询参数不同），`reload()` 只会重载**当前** URL。
+        //
+        // 导航会重新加载页面，因此组件里的临时状态（选焦点面板、写了一半的内容）
+        // 会被清掉。这可接受：改设置是**刻意的一次操作**，
+        // 而且那个面板本来就会因为失焦而收起。
+        if visible {
+            // **`navigate()` 要绝对 URL**（实测：给相对地址报
+            // `relative URL without a base`）。
+            //
+            // 做法：拿窗口**当前**的 URL 作基准，再拼上新的查询参数 ——
+            // 这样不需要知道应用协议在各平台的 scheme 与 host
+            // （Windows 上是 `http://tauri.localhost/`），
+            // 也不会写死一个平台细节。
+            let base = if let Ok(current) = window.url() {
+                current.as_str().split('?').next().unwrap_or("").to_string()
+            } else {
+                String::new()
+            };
+            if base.is_empty() {
+                eprintln!("[shell] ✗ 取不到悬浮组件的当前地址，无法应用不透明度");
+            } else {
+                let url = format!("{base}?opacity={opacity}");
+                match url.parse() {
+                    Ok(parsed) => {
+                        if let Err(error) = window.navigate(parsed) {
+                            eprintln!("[shell] ✗ 让悬浮组件应用不透明度失败：{error}");
+                        }
+                    }
+                    // 拼出来的地址解析不了说明代码写错了，必须说出来而不是静默跳过
+                    Err(error) => eprintln!("[shell] ✗ 悬浮组件地址非法（{url}）：{error}"),
+                }
+            }
+        }
     }
     // 托盘菜单文案要跟着"显示/隐藏"变
     refresh_tray_menu(app);
 
-    println!("[shell] 设置已应用：悬浮组件 {}，不透明度 {opacity:.2}",
-        if visible { "显示" } else { "隐藏" });
+    println!(
+        "[shell] 设置已应用：悬浮组件 {}，不透明度 {opacity:.2}",
+        if visible { "显示" } else { "隐藏" }
+    );
 }
 
 /// 数据目录的只读视图（`get_shell_settings` 要报给界面看）。
