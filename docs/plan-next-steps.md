@@ -340,7 +340,46 @@ WebView2 同样适用这条规则。做法：`src/ui/server.ts` 只对**自家�
 | **B3-3** ✅ | Node 随包 + 资源打包 + 启动自检 | 见 §4.1.5 |
 | **B3-4** ✅ | 快记窗改走应用协议 —— **关闭缺陷随之解决** | 见 §B3 缺陷小节 |
 | **B3-5** ✅ | 托盘 + 悬浮组件 + 开机自启（步 C） | 见 §4.1.6 |
-| **B3-6** | **NSIS 安装包** | 产出 `.exe` 安装器 |
+| **B3-6** ✅ | **NSIS 安装包** | 见 §4.1.8 |
+
+**B3-6 已完成**，产出：
+
+```
+D:\cargo-target\workhelper-shell\release\bundle\nsis\工作秘书_0.3.0_x64-setup.exe
+27.19 MiB（GUI 子系统安装器，按用户安装、不需要管理员）
+```
+
+### 4.1.8 B3-6 实施记录（已完成）
+
+| 项 | 做法 |
+| --- | --- |
+| 打包开关 | `bundle.active: true`、`targets: ["nsis"]` |
+| 安装范围 | `installMode: "currentUser"` —— **不需要管理员权限** |
+| 语言 | `languages: ["SimpChinese", "English"]`（实测被 NSIS 接受） |
+| 图标 | `bundle.icon` 四个文件（32/128/128@2x/ico） |
+| 无控制台 | `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`，实测 PE Subsystem = 2 |
+
+**打包命令**（在 `shell\src-tauri` 下跑 —— `cargo tauri build` **不接受 `--manifest-path`**）：
+
+```
+cd shell\src-tauri
+cargo tauri build
+```
+
+**踩到的两个坑**：
+
+1. **`beforeBuildCommand` 的执行目录不可控**。tauri-cli 用
+   `resolve_frontend_dir()` 定位它，而那个函数靠**找 `package.json`** 推导 ——
+   本仓库是零依赖设计，**根本没有 `package.json`**，于是它退回一个与预期不同的目录
+   （实测算成了 `D:\projects`），相对路径 `../../scripts/...` 因此指向不存在的地方。
+
+   **改法**：删掉 `beforeBuildCommand`，改由 **`build.rs` 刷新资源** ——
+   它有 `CARGO_MANIFEST_DIR`，路径推导可靠，不依赖任何外部约定。
+   为此给 `prepare-resources.mjs` 加了 `--src-only`（只同步 400KB 的源码树、
+   跳过 100MB 的 node.exe，实测 **303ms**；完整模式仍供升级 Node 时手动跑）。
+
+2. **`tauri-cli` 要自己装**：`cargo install tauri-cli --version '^2' --locked`，
+   本机编译实测 **38 分钟**（它要编 bundler 与 NSIS 支持）。
 
 **B3-6 是下一步**（用户确认的推进方向）。它同时是 M1 的终点：
 做完才算"能装到另一台机器上跑起来"。

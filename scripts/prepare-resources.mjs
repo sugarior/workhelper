@@ -30,12 +30,33 @@ console.log(`Node     : ${node}`);
 console.log(`版本     : ${version}`);
 console.log(`资源目录 : ${RESOURCES}`);
 
+/**
+ * `--src-only`：只刷新内核源码树，**不碰那 100MB 的 node.exe**。
+ *
+ * 为什么需要它：node.exe 只在系统 Node 升级时才需要更新，
+ * 而 `src/` **每次改动内核都要同步** —— 否则打包出来的东西跑的是旧内核。
+ * 每次都拷 100MB 太浪费（实测整脚本 4.1 秒，其中绝大部分是那个大文件）。
+ *
+ * 谁用它：`build.rs` 在每次编译前调一次，保证 `resources/src/` 与仓库一致。
+ * 完整模式（不带参数）仍由人在升级 Node 时手动跑。
+ */
+const srcOnly = process.argv.includes('--src-only');
+
+console.log(`模式     : ${srcOnly ? '仅刷新 src（跳过 node.exe）' : '完整'}`);
+
 // 1. Node 运行时
 const nodeDir = join(RESOURCES, 'node');
 mkdirSync(nodeDir, { recursive: true });
 const target = join(nodeDir, 'node.exe');
-cpSync(node, target);
-console.log(`\n[1/2] 已复制 node.exe → ${(statSync(target).size / 1024 / 1024).toFixed(1)} MB`);
+if (srcOnly) {
+  // 只模式不复制，但要确认它**已经在**：缺了就是打包缺件，
+  // 那种错误要到用户机器上才暴露，必须在这里拦住。
+  statSync(target);
+  console.log(`\n[1/2] 跳过 node.exe（已存在 ${(statSync(target).size / 1024 / 1024).toFixed(1)} MB）`);
+} else {
+  cpSync(node, target);
+  console.log(`\n[1/2] 已复制 node.exe → ${(statSync(target).size / 1024 / 1024).toFixed(1)} MB`);
+}
 
 // 2. 内核源码树。
 //    Node 26 直接运行 .ts（类型剥离），**不需要任何构建步骤、也没有 node_modules 依赖** ——
@@ -50,6 +71,12 @@ console.log(`[2/2] 已复制 src/ → ${srcDir}`);
 const entry = join(srcDir, 'ui', 'main.ts');
 statSync(entry);
 console.log(`\n入口确认 : ${entry}`);
+
+if (srcOnly) {
+  // 只模式下不重复验证 node.exe 能否运行（没动它，上一次已经验过）
+  console.log('\n完成（仅 src）。');
+  process.exit(0);
+}
 
 // 自检：随包的 Node 必须能跑起来（复制损坏时要在这里就发现，而不是装到用户机器上）
 const bundledVersion = execFileSync(target, ['--version'], { encoding: 'utf8' }).trim();

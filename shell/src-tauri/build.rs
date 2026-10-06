@@ -43,5 +43,48 @@ fn main() {
     let static_dir = repo_root.join("src").join("ui").join("static");
     println!("cargo:rerun-if-changed={}", static_dir.display());
 
+    // 界面资源已声明依赖；内核源码树同理 —— `resources/src/` 是打包态内核的来源，
+    // 它落后于仓库就会出现"装好的程序跑旧内核"。
+    //
+    // **为什么放在 build.rs 而不是 tauri.conf.json 的 `beforeBuildCommand`**：
+    // 那个钩子的执行目录由 tauri-cli 的 `resolve_frontend_dir()` 决定，而它靠找
+    // `package.json` 来定位前端目录 —— 本仓库是零依赖设计，**根本没有 package.json**，
+    // 于是它退回一个与预期不同的目录（实测算成了 `D:\projects`），
+    // 相对路径 `../../scripts/...` 因此指向不存在的地方。
+    // build.rs 有 `CARGO_MANIFEST_DIR`，路径推导可靠，不依赖任何外部约定。
+    //
+    // 用 `--src-only`：node.exe 有 100MB，只在系统 Node 升级时才需要重拷
+    // （那一步由人手动跑完整模式）。这里只同步那份 400KB 左右的源码树。
+    refresh_kernel_resources(&repo_root);
+
     tauri_build::build()
+}
+
+/// 把仓库的 `src/` 同步进 `resources/src/`，让打包态内核与仓库一致。
+///
+/// **失败要说出来**：这里静默失败的后果是"打包出来的程序跑旧内核"，
+/// 那是最难查的一类问题（代码看着是新的，行为是旧的）。
+fn refresh_kernel_resources(repo_root: &std::path::Path) {
+    let script = repo_root.join("scripts").join("prepare-resources.mjs");
+    if !script.is_file() {
+        println!("cargo:warning=找不到 {script:?}，跳过资源刷新");
+        return;
+    }
+    let output = std::process::Command::new("node")
+        .arg(&script)
+        .arg("--src-only")
+        .output();
+    match output {
+        Ok(result) if result.status.success() => {
+            // 正常路径不打印：`--src-only` 成功时没什么可说的，
+            // 每次构建都刷一屏反而掩盖真正的问题
+        }
+        Ok(result) => {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            println!("cargo:warning=内核资源刷新失败（打包态会跑旧内核）：{stderr}");
+        }
+        Err(error) => {
+            println!("cargo:warning=无法运行 node 来刷新内核资源：{error}");
+        }
+    }
 }
