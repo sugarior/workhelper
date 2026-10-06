@@ -58,6 +58,14 @@ export interface SystemService {
    */
   getSettings(): { dayBoundaryHour: number; entries: { key: string; value: unknown; updatedAt: string }[] };
   /**
+   * 改每日切日时刻（F-19）。**与 `getSettings` 配对**：读是 `getSettings`（数据快照），
+   * 写是本方法。
+   *
+   * 为什么不能只放在 `settings` 子对象里：HTTP 派发按名字调**顶层**方法，
+   * 埋在子对象里的界面调不到 —— 白名单放它进来，派发时仍报"没有方法"。
+   */
+  setDayBoundaryHour(hour: number): { dayBoundaryHour: number };
+  /**
    * 解析手工输入的截止日期（F-07 的兜底入口）。
    *
    * 放在 system 而不是 planning：它是**纯函数式的日期解析**，与"日界"同属日历能力，
@@ -196,6 +204,22 @@ export function createSystemService(database: DatabaseSync, backupDir: string): 
       dayBoundaryHour: settings.dayBoundaryHour(),
       entries: settings.list(),
     }),
+
+    /**
+     * 改每日切日时刻（F-19）。
+     *
+     * **必须是顶层方法，不能只在 `settings` 子对象里**：
+     * HTTP 派发按名字调服务门面的**顶层**方法（见 server.ts 的 `service[method]`），
+     * 而 `settings.setDayBoundaryHour` 是嵌在子对象里的 —— 白名单放它进来，
+     * 派发时仍然找不到，报"服务 system 没有方法「setDayBoundaryHour」"。
+     * 这与 `getSettings` 的形态保持一致：读用 `getSettings`、写用本方法。
+     *
+     * 校验在仓储层（`assertBoundaryHour`，0–23），脏输入进不来。
+     */
+    setDayBoundaryHour: (hour: number): { dayBoundaryHour: number } => {
+      settings.setDayBoundaryHour(hour);
+      return { dayBoundaryHour: settings.dayBoundaryHour() };
+    },
 
     parseDueInput: (raw) => parseDueInput(raw, {
       today: todayKey(settings.dayBoundaryHour(), new Date()),

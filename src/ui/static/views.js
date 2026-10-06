@@ -1,10 +1,10 @@
-// 四个页签的渲染逻辑：收件箱 / 今日 / 项目 / 日志。
+// 各页签的渲染逻辑：收件箱 / 全部 / 今日 / 资料 / 项目 / 日志 / 设置。
 //
 // 这里只做「取数 → 渲染 → 收集输入 → 调接口 → 重绘」，
 // 任何业务判断（能否流转、是否阻塞、汇总口径）都在内核里。
 
 import { api } from '/api.js';
-import { notifyWidget } from '/ipc.js';
+import { notifyWidget, inShell, invokeShell } from '/ipc.js';
 import {
   el, mount, clear, shortId, todayDayKey, timeOf, dateTimeOf, flash, withBusy,
   STATUS_MARK, PROGRESS_LABEL,
@@ -1896,7 +1896,6 @@ function materialRow(material, options, onChanged) {
 
 /** 资料页签的当前筛选（页面内保留，切走再回来不跳回默认项） */
 let materialOrphanOnly = false;
-
 /** 资料页（F-14）：按时间倒序，可筛"未挂靠"，可改/追加挂靠 */
 export async function renderMaterials(root) {
   let materials;
@@ -1991,3 +1990,202 @@ export function materialFoldRow(type, id) {
   return box;
 }
 
+
+// ============================================================
+// 设置页（F-05 / F-17 / F-18 / F-19）
+// ============================================================
+//
+// **设置分两处存**（不是疏漏，是有意的）：
+//   · 数据语义（日界）→ 内核的 settings 表，**跟着数据一起备份**
+//   · 这台机器的窗口与 OS 状态（悬浮组件、自启）→ 外壳的 config.json
+// 理由：悬浮组件的不透明度要在**建窗口时**用到，那时内核可能还没起来；
+// 而日界是数据语义，换机器时该跟着走。
+//
+// 因此本页**分别取两处、合并显示** —— 而不是在某一侧做代理，
+// 那会多一层没有收益的转发。
+
+/** 设置页的渲染。 */
+export async function renderSettings(root) {
+  let shell = null;
+  let dayBoundaryHour = null;
+  try {
+    [shell, dayBoundaryHour] = await Promise.all([
+      shellSettings(),
+      api.dayBoundaryHour(),
+    ]);
+  } catch (error) {
+    mount(root, [
+      el('h2', {}, '设置'),
+      el('div', { class: 'empty' }, `读取设置失败：${error.message}`),
+    ]);
+    return;
+  }
+
+  if (shell === null) {
+    // 浏览器里开发时没有外壳。**明说**而不是显示一堆不可用的控件 ——
+    // 那会让人以为"这些设置坏了"。
+    mount(root, [
+      el('h2', {}, '设置'),
+      el('div', { class: 'empty' },
+        '外壳相关的设置（热键、悬浮组件、开机自启）需要在桌面程序里查看。'
+        + '浏览器里开发时只显示数据侧的设置。'),
+      el('div', { class: 'settings-group' }, [
+        el('h3', {}, '数据'),
+        boundaryRow(dayBoundaryHour, root),
+      ]),
+    ]);
+    return;
+  }
+
+  mount(root, [
+    el('h2', {}, '设置'),
+
+    el('div', { class: 'settings-group' }, [
+      el('h3', {}, '数据'),
+      boundaryRow(dayBoundaryHour, root),
+      // 数据目录**只读显示**：改它要动 config.json 且需重启（见 plan §4.1.2
+      // 的用户确认）。给一个输入框会让人以为改完立刻生效 —— 那更容易出错。
+      el('div', { class: 'settings-row' }, [
+        el('label', {}, '数据目录'),
+        el('div', { class: 'settings-value' }, [
+          el('code', {}, shell.dataDir),
+          el('div', { class: 'settings-hint' },
+            `改动需编辑 ${shell.configPath} 并重启（界面改写它会让"文件位置"与"运行中的库"不一致）`),
+        ]),
+      ]),
+    ]),
+
+    el('div', { class: 'settings-group' }, [
+      el('h3', {}, '悬浮组件'),
+      el('div', { class: 'settings-row' }, [
+        el('label', {}, '常驻显示'),
+        toggle(shell.widgetVisible, async (next) => {
+          await setShellSetting('widgetVisible', next);
+          await renderSettings(root);
+        }),
+      ]),
+      el('div', { class: 'settings-row' }, [
+        el('label', {}, '不透明度'),
+        opacitySlider(shell.widgetOpacity, root),
+      ]),
+    ]),
+
+    el('div', { class: 'settings-group' }, [
+      el('h3', {}, '开机自启'),
+      el('div', { class: 'settings-row' }, [
+        el('label', {}, '随系统启动'),
+        toggle(shell.autostartEnabled, async (next) => {
+          try {
+            await setShellSetting('autostartEnabled', next);
+            flash(next ? '已开启开机自启' : '已关闭开机自启');
+          } catch (error) {
+            flash(`设置开机自启失败：${error.message}`, 'error');
+          }
+          await renderSettings(root);
+        }),
+      ]),
+      el('div', { class: 'settings-hint' },
+        '写在当前用户的注册表 Run 键下，不需要管理员权限；启动后常驻托盘。'),
+    ]),
+
+    el('div', { class: 'settings-group' }, [
+      el('h3', {}, '快捷键'),
+      hotkeyRow('快记', shell.hotkeyCapture),
+      hotkeyRow('记一笔', shell.hotkeyNote),
+      el('div', { class: 'settings-hint' },
+        '快捷键暂不支持在界面里改（要改请编辑外壳源码里的常量并重新编译）。'
+        + '做成自定义需要一个按键捕获控件与冲突检测，已列入后续迭代。'),
+    ]),
+  ]);
+}
+
+/** 行：每日边界小时（F-19）。 */
+function boundaryRow(current, root) {
+  const select = el('select', {}, [0, 1, 2, 3, 4, 5, 6].map((hour) =>
+    el('option', { value: String(hour) },
+      hour === 0 ? '0 点（自然日）' : `凌晨 ${hour} 点`)));
+
+  // **必须在选项挂进 select 之后再设 value**。
+  // 原来用 `el('option', { selected: ... })` 在挂载前设属性 —— 那是无效的，
+  // 浏览器会退回选中第一项，于是设置页显示"0 点"而内核里其实是 4 点。
+  // 这种"显示的值与实际不符"最危险：用户会照着假值做判断。
+  select.value = String(current);
+
+  select.addEventListener('change', () => void (async () => {
+    const hour = Number(select.value);
+    try {
+      await api.setDayBoundaryHour(hour);
+      flash(`已改为${hour === 0 ? '自然日' : `凌晨 ${hour} 点`}切日`);
+      // 重新渲染整页：日界一变，"今日"的范围就变了，别的页签也该跟着重算
+      await onDataChanged();
+    } catch (error) {
+      flash(`修改失败：${error.message}`, 'error');
+      select.value = String(current);
+    }
+  })());
+
+  return el('div', { class: 'settings-row' }, [
+    el('label', {}, '每日切日时刻'),
+    el('div', { class: 'settings-value' }, [
+      select,
+      el('div', { class: 'settings-hint' },
+        '凌晨写的记录算前一天。默认 4 点 —— 熬夜到 1 点记的事不该算第二天。'),
+    ]),
+  ]);
+}
+
+/** 一个开关。改动即生效，不设"保存"按钮（那是表单式思维，设置项不该攒着一起交）。 */
+function toggle(checked, onChange) {
+  const input = el('input', { type: 'checkbox', class: 'settings-toggle' });
+  input.checked = checked;
+  input.addEventListener('change', () => void onChange(input.checked));
+  return input;
+}
+
+/** 不透明度的滑块：拖动时就预览，松手才落盘。 */
+function opacitySlider(current, root) {
+  const input = el('input', {
+    type: 'range', min: '0.3', max: '1', step: '0.05', class: 'settings-range',
+  });
+  input.value = String(current);
+  const label = el('span', { class: 'settings-num' }, `${Math.round(current * 100)}%`);
+
+  // 拖动过程只改显示：每次 input 都写盘会几十次/秒
+  input.addEventListener('input', () => {
+    label.textContent = `${Math.round(Number(input.value) * 100)}%`;
+  });
+  input.addEventListener('change', () => void (async () => {
+    const result = await setShellSetting('widgetOpacity', Number(input.value));
+    // **用外壳返回的真值回填**：它可能被夹到合法范围，
+    // 不回填的话滑块停在用户拖到的位置、而实际值不是那个
+    if (typeof result === 'number') {
+      input.value = String(result);
+      label.textContent = `${Math.round(result * 100)}%`;
+    }
+  })());
+
+  return el('div', { class: 'settings-value' }, [
+    el('div', { class: 'settings-inline' }, [input, label]),
+  ]);
+}
+
+/** 只读显示一个快捷键。 */
+function hotkeyRow(label, keys) {
+  return el('div', { class: 'settings-row' }, [
+    el('label', {}, label),
+    el('div', { class: 'settings-value' }, [el('code', {}, keys)]),
+  ]);
+}
+
+/** 读外壳设置。浏览器里返回 null（没有外壳）。 */
+async function shellSettings() {
+  if (!inShell()) return null;
+  const value = await invokeShell('get_shell_settings');
+  return value ?? null;
+}
+
+/** 改一项外壳设置，返回生效后的真实值。 */
+async function setShellSetting(key, value) {
+  const result = await invokeShell('set_shell_setting', { key, value });
+  return result;
+}

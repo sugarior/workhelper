@@ -82,7 +82,11 @@ const ALLOWED: Readonly<Record<string, readonly string[]>> = {
    * 后者会短暂存在一条违反 M1 的零挂靠资料，且中途失败就留下孤儿。
    */
   material: ['create', 'get', 'list', 'listForTarget', 'update', 'link', 'unlink', 'remove', 'entryTargets'],
-  system: ['getSettings', 'backup', 'integrityCheck', 'parseDueInput',
+  // `setDayBoundaryHour` 是**专用方法而不是通用的 setSetting**：
+  // 通用写接口等于让前端能覆盖任意设置键（例如 `capture.undoLog`，
+  // 那是撤销功能的数据）—— 白名单的意义正是把能力收窄到具体动作。
+  // 服务层对它有范围校验（0–23），因此脏输入进不来。
+  system: ['getSettings', 'setDayBoundaryHour', 'backup', 'integrityCheck', 'parseDueInput',
     'trashOverview', 'restoreIgnored', 'purgeIgnored', 'restoreTrash', 'purgeTrash'],
 };
 

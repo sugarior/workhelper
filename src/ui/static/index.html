@@ -6,7 +6,7 @@
   <title>WorkHelper 工作秘书</title>
   <!-- 版本参数必须覆盖所有静态资源（见 capture.html 里的说明：
        此前只有 .js 带版本，改 CSS 后界面仍用旧样式） -->
-  <link rel="stylesheet" href="/app.css?v=0.24.0">
+  <link rel="stylesheet" href="/app.css?v=0.25.0">
 </head>
 <body>
   <header class="top">
@@ -21,6 +21,11 @@
       <button data-tab="materials">资料</button>
       <button data-tab="projects">项目</button>
       <button data-tab="log">日志</button>
+      <!-- 设置做成**页签**（用户要求）：它不是一个弹窗，而是一页。
+           与"低频、偏系统、不占主导航"的回收站不同 —— 设置是要**反复回来**的地方
+           （改日界、开关悬浮组件、开关开机自启），放在主导航里才顺手。
+           托盘菜单的「设置…」也打开到这一页。 -->
+      <button data-tab="settings">设置</button>
     </nav>
     <div class="search-box">
       <input type="search" id="search" placeholder="搜索（中文子串可用）" autocomplete="off">
@@ -42,6 +47,6 @@
 
   <!-- 带版本参数：换了版本号浏览器就会重新拉取，即使此前缓存过。
        服务端同时发送 no-cache，两者叠加确保改完前端必定生效。 -->
-  <script type="module" src="/app.js?v=0.24.0"></script>
+  <script type="module" src="/app.js?v=0.25.0"></script>
 </body>
 </html>

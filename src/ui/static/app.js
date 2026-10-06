@@ -7,6 +7,7 @@ import { inShell, invokeShell } from '/ipc.js';
 import {
   renderInbox, renderAll, renderToday, renderProjects, renderLog, renderTrash, renderMaterials,
   renderFocusBar, focusNoteInput, setRefreshHook,
+  renderSettings,
   // 搜索结果定位（F-15）：路由与"渲染后高亮"都在 views.js 里 ——
   // 它才知道 allMode 之类的模块状态，也知道每个实体由谁画出来。
   canLocate, prepareLocate, applyPendingHighlight,
@@ -28,6 +29,7 @@ const RENDERERS = {
   materials: renderMaterials,
   projects: renderProjects,
   log: renderLog,
+  settings: renderSettings,
   // 回收站不是页签而是右上角入口（需求 F-21b：低频、偏系统，不占主导航）。
   // 但它仍然是一条"当前显示哪一页"的路由，所以放在同一张表里。
   trash: renderTrash,

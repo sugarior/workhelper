@@ -748,8 +748,176 @@ fn take_pending_tab(state: tauri::State<'_, PendingTab>) -> String {
     guard.take().unwrap_or_default()
 }
 
+/// 页面调用：读外壳侧的设置（那些**不属于数据语义**、只跟这台机器有关**的设置）。
+///
+/// **为什么外壳设置与内核设置分开读**：两者归属不同（见 `ShellConfig` 的说明），
+/// 因此没有一个"统一的设置接口"——页面分别取、合并显示。
+/// 强行统一就得在某一侧做代理，多一层没有收益的转发。
+#[tauri::command]
+fn get_shell_settings(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let Some(state) = app.try_state::<ShellState>() else {
+        return Err("配置状态未注册（内部错误）".to_string());
+    };
+    let config = state.config.lock().map_err(|_| "配置锁被污染")?;
+    let config_path = state.config_root.join("config.json");
+    Ok(serde_json::json!({
+        "widgetVisible": config.widget_visible,
+        "widgetOpacity": config.widget_opacity,
+        "dataDir": app.try_state::<DataDirView>().map(|d| d.0.clone()).unwrap_or_default(),
+        "configPath": config_path.to_string_lossy(),
+        "autostartEnabled": autostart_enabled(),
+        "hotkeyCapture": HOTKEY_CAPTURE,
+        "hotkeyNote": HOTKEY_NOTE,
+    }))
+}
+
+/// 页面调用：改一项外壳设置。返回该设置**生效后的真实值**。
+///
+/// **为什么返回真实值**：设置里有些项会被夹到合法范围（例如不透明度 0.3–1.0）。
+/// 只回 `ok` 的话，界面上的滑块会停在用户拖到的位置，而实际值不是那个 ——
+/// 下次打开设置页会"跳一下"。回真值让界面立刻对齐。
+#[tauri::command]
+fn set_shell_setting(
+    app: tauri::AppHandle,
+    key: String,
+    value: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let Some(state) = app.try_state::<ShellState>() else {
+        return Err("配置状态未注册（内部错误）".to_string());
+    };
+
+    let result = {
+        let mut config = state.config.lock().map_err(|_| "配置锁被污染")?;
+        match key.as_str() {
+            "widgetVisible" => {
+                let visible = value.as_bool().ok_or("widgetVisible 需要布尔值")?;
+                config.widget_visible = visible;
+                serde_json::json!(visible)
+            }
+            "widgetOpacity" => {
+                let raw = value.as_f64().ok_or("widgetOpacity 需要数字")?;
+                // 夹到可用区间：0 会让组件完全看不见，用户会以为是 bug
+                let clamped = raw.clamp(0.3, 1.0);
+                config.widget_opacity = clamped;
+                serde_json::json!(clamped)
+            }
+            "autostartEnabled" => {
+                let enabled = value.as_bool().ok_or("autostartEnabled 需要布尔值")?;
+                set_autostart(enabled)?;
+                serde_json::json!(enabled)
+            }
+            other => return Err(format!("不认识的设置项：{other}")),
+        }
+    };
+
+    // 落盘 + 让界面生效
+    {
+        let config = state.config.lock().map_err(|_| "配置锁被污染")?;
+        config.save(&state.config_root);
+    }
+    apply_shell_settings(&app);
+
+    Ok(result)
+}
+
+/// 把当前配置应用到正在运行的界面（改了设置不该要重启才看到）。
+fn apply_shell_settings(app: &tauri::AppHandle) {
+    let Some(state) = app.try_state::<ShellState>() else {
+        return;
+    };
+    let (visible, opacity) = {
+        let Ok(config) = state.config.lock() else {
+            return;
+        };
+        (config.widget_visible, config.widget_opacity)
+    };
+
+    if let Some(window) = app.get_webview_window(WIDGET_LABEL) {
+        if visible {
+            let _ = window.show();
+        } else {
+            let _ = window.hide();
+        }
+    }
+    // 不透明度是**页面侧**的 CSS 变量（窗口级透明度 Tauri 2 不支持），
+    // 因此要请页面重画 —— 而复用已有的指令通道，不新增通信方式。
+    if let Some(slot) = app.try_state::<WidgetCommandSlot>() {
+        slot.put(WidgetCommand::Refresh);
+    }
+    // 托盘菜单文案要跟着"显示/隐藏"变
+    refresh_tray_menu(app);
+
+    println!("[shell] 设置已应用：悬浮组件 {}，不透明度 {opacity:.2}",
+        if visible { "显示" } else { "隐藏" });
+}
+
+/// 数据目录的只读视图（`get_shell_settings` 要报给界面看）。
+struct DataDirView(String);
+
 /// 应用名，用于 `%APPDATA%` 下的目录名与配置文件位置。
 const APP_DIR_NAME: &str = "WorkHelper";
+
+/// 注册表 Run 键的位置。**用 `HKCU` 而不是 `HKLM`**：
+/// 每用户生效、**不需要管理员权限** —— 开机自启是用户自己的选择，
+/// 为它要求提权是不合理的。
+const AUTOSTART_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const AUTOSTART_NAME: &str = "WorkHelper";
+
+/// 查开机自启是否已开启。
+///
+/// **以注册表为准，而不是以我们的期望为准**：用户可能用别的工具清掉过它。
+/// 设置页显示的状态必须是他机器上的真实状态。
+fn autostart_enabled() -> bool {
+    let Ok(output) = Command::new("reg")
+        .args(["query", AUTOSTART_KEY, "/v", AUTOSTART_NAME])
+        .output()
+    else {
+        return false;
+    };
+    output.status.success()
+}
+
+/// 开启或关闭开机自启（需求 F-18）。
+///
+/// **失败必须报错**：注册表被策略锁住、或 `reg.exe` 不可用时，
+/// 静默失败会让用户以为"已经开了"，而下次重启发现没生效 —— 那是最难查的形态。
+fn set_autostart(enabled: bool) -> Result<(), String> {
+    let output = if enabled {
+        // 命令里带引号：安装路径可能含空格（默认装到 `%LOCALAPPDATA%\Programs\...`）
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("取不到自身路径：{e}"))?
+            .to_string_lossy()
+            .to_string();
+        Command::new("reg")
+            .args([
+                "add",
+                AUTOSTART_KEY,
+                "/v",
+                AUTOSTART_NAME,
+                "/t",
+                "REG_SZ",
+                "/d",
+                &format!("\"{exe}\""),
+                "/f",
+            ])
+            .output()
+    } else {
+        Command::new("reg")
+            .args(["delete", AUTOSTART_KEY, "/v", AUTOSTART_NAME, "/f"])
+            .output()
+    }
+    .map_err(|e| format!("调用 reg.exe 失败：{e}"))?;
+
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // 关闭时"键不存在"不算失败 —— 那正是想要的结果
+        if !enabled && detail.contains("unable to find") {
+            return Ok(());
+        }
+        return Err(format!("写注册表失败：{detail}"));
+    }
+    Ok(())
+}
 
 /// 页面调用：收起悬浮组件的输入态（Esc 或点 ✕）。
 ///
@@ -1464,6 +1632,7 @@ fn main() {
     // `spawn_kernel` 之后就不再用 `paths.config`，因此这里 clone 一份即可。
     let config_for_state = paths.config.clone();
     let config_root_for_state = paths.config_root.clone();
+    let data_dir_for_state = paths.data_dir.to_string_lossy().to_string();
 
     // 端口已被占用时不重复拉起 —— 内核是单实例设计，
     // 第二个进程会因端口冲突失败（或更糟：两个进程写同一个库）
@@ -1536,7 +1705,11 @@ fn main() {
             collapse_widget,
             save_widget_position,
             take_pending_tab,
+            get_shell_settings,
+            set_shell_setting,
         ])
+        // 数据目录的只读视图（设置页要显示"数据存在哪"）。
+        .manage(DataDirView(data_dir_for_state))
         // 托盘要求主窗口切到的页签（页面轮询取走）。
         .manage(PendingTab(std::sync::Mutex::new(None)))
         // 悬浮组件的指令槽（进入输入 / 重画 / 选焦点）。

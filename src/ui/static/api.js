@@ -179,6 +179,7 @@ export const api = {
   // 而不是一个带方法的 settings 对象（那样序列化后只剩空对象）。
   settingsList: () => call('system', 'getSettings').then((data) => data.entries),
   dayBoundaryHour: () => call('system', 'getSettings').then((data) => data.dayBoundaryHour),
+  setDayBoundaryHour: (hour) => call('system', 'setDayBoundaryHour', [hour]),
   backup: (reason = 'manual') => call('system', 'backup', reason),
   integrityCheck: () => call('system', 'integrityCheck'),
 };

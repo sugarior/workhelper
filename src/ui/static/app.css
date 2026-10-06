@@ -254,6 +254,66 @@ textarea.log-body { width: 100%; min-height: 190px; resize: vertical; font-famil
 
 
 
+/* ---------- 设置页 ---------- */
+
+.settings-group {
+  margin: 0 0 20px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+}
+.settings-group h3 {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+/* 一行 = 标签 + 值。标签固定宽度让多行的值左边缘对齐，
+   否则一眼扫下来是锯齿状的。 */
+.settings-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 0;
+}
+.settings-row > label {
+  flex: 0 0 110px;
+  padding-top: 3px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.settings-value { flex: 1 1 auto; min-width: 0; }
+
+/* 说明文字弱化：它是解释，不该与设置项本身抢注意力 */
+.settings-hint {
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.settings-inline { display: flex; align-items: center; gap: 10px; }
+.settings-num {
+  min-width: 40px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  font-size: 12.5px;
+}
+.settings-range { flex: 0 0 200px; }
+.settings-toggle { width: 16px; height: 16px; cursor: pointer; }
+
+/* 设置页里的 code（路径与快捷键）要能整段看到，因此允许换行 */
+.settings-value code {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-soft);
+  font-size: 12px;
+  word-break: break-all;
+}
+
 /* ---------- 搜索结果定位（F-15）---------- */
 
 /* 可定位的结果整行做成按钮。用按钮而不是给 li 挂 onclick：

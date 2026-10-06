@@ -20,6 +20,10 @@ tauri-plugin-global-shortcut = "2.4.0"
 # 在 PATH 里找 node。自己解析 PATH 要处理 .exe/.cmd、PATHEXT、大小写等一堆细节，
 # 而这个 crate 足够小且只做这一件事。
 which = "8.0.6"
+# 设置接口要在 Rust 与页面之间传结构化数据（`get_shell_settings` 返回一个对象）。
+# tauri 内部依赖它，但**直接 `use` 就必须显式声明** —— 否则哪天 tauri 换了
+# 内部依赖，编译会突然失败而看不出原因。
+serde_json = "1"
 
 # 只发 release 的 strip，减小体积
 [profile.release]
