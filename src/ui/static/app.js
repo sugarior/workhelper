@@ -285,7 +285,27 @@ window.addEventListener('focus', () => {
 });
 window.addEventListener('blur', stopNotePolling);
 
+/**
+ * 轮询"外面改了数据、该重画了"的标记。
+ *
+ * **为什么需要它**：悬浮组件里也能改焦点（点小条上的任务名切换）——
+ * 那之后主界面顶部的聚焦条仍显示旧任务，两处就不一致了。
+ * 依赖 `window.focus` 刷新解决不了：窗口可能**本来就是**聚焦的，那种情况下
+ * focus 事件不会再触发。
+ */
+let mainPoller = null;
+
+function startMainPolling() {
+  if (!inShell() || mainPoller !== null) return;
+  mainPoller = setInterval(() => {
+    void (async () => {
+      if (await invokeShell('take_main_refresh')) await refresh();
+    })();
+  }, 200);
+}
+
 // 窗口一开始就是聚焦的，因此启动时也要轮询（只靠 focus 事件会漏掉首次）
 startNotePolling();
+startMainPolling();
 
 void render('inbox');

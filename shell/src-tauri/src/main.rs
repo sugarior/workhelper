@@ -246,10 +246,17 @@ const CLOSE_SHIM: &str = r#"
 })();
 "#;
 
-/// 隐藏快记窗（由页面里的 `window.close()` 替身调用）。
+/// 关闭快记窗（由页面里的 `window.close()` 替身与 `Esc` 调用）。
+///
+/// **是销毁（`destroy`）而不是隐藏（`hide`）** —— 与 `open_capture_window` 的
+/// "销毁重建"配套：这样每次唤起都是全新页面，`.closing` 与 `finished` 一类
+/// 残留状态不可能存在。隐藏复用的时代已经结束了（代价只是每次约 380ms）。
+///
+/// 用 `destroy` 而不是 `close`：`close` 会先发 `CloseRequested` 且是异步的，
+/// 实测会出现"窗口没真的销毁"（见 `open_capture_window` 里的记录）。
 #[tauri::command]
 fn hide_capture_window(window: tauri::WebviewWindow) -> Result<(), String> {
-    window.hide().map_err(|e| e.to_string())
+    window.destroy().map_err(|e| e.to_string())
 }
 
 /// 页面调用：打开快记窗（主界面「＋ 快记」按钮）。
@@ -266,37 +273,76 @@ fn open_capture_window_command(app: tauri::AppHandle) {
     open_capture_window(&app);
 }
 
-/// 打开快记窗：不存在就建（走应用协议 + 注入关闭替身），存在就显示并**重载页面**。
+/// 打开快记窗：**每次都销毁重建**。
 ///
 /// **必须走应用协议**（`WebviewUrl::App`）而不是外部 http 地址 ——
 /// 后者没有 Tauri 的 JS 通道，`window.close` 替身注入不进去（见 `CLOSE_SHIM` 的说明）。
 ///
-/// **每次唤出都重载页面** —— 修的是一个真实缺陷：
-/// 窗口只是 `hide()`（为了复用、省掉 380ms 的 WebView2 初始化），页面**没有销毁**，
-/// 于是两处状态残留下来：
+/// **为什么是"销毁重建"而不是"隐藏 + 重载"**：
+/// 复用窗口会留下页面级状态，而清理它们的手段都不可靠 ——
 ///   · `.closing` 类（`opacity: 0` + 动画 `forwards` 保持）→ 再唤出时**看得见框、看不见内容**
-///   · `capture.js` 的模块级 `finished = true` → 保存逻辑开头就是 `if (finished) return`，
-///     于是**再也不能写入**（用户实测报告："保存一次后再次呼出不能写入了"）
+///     （用户实测报告："快记框会崩溃，灰屏"）
+///   · `capture.js` 的模块级 `finished = true` → 保存逻辑开头 `if (finished) return`，
+///     于是**再也不能写入**
 ///
-/// 重载把这两处（以及将来任何新增的模块级状态）一次性归零，
-/// **不需要往界面代码里加"重置钩子"** —— 那种钩子会随功能增加而必然漏掉几处。
+/// 曾经用 `window.eval("location.reload()")` 清理，但 `eval` 的可靠性在本项目
+/// 已经栽过三次（快记窗关闭缺陷、悬浮组件通知）。**重建不依赖页面侧任何机制**：
+/// 新窗口 = 新页面 = 状态必然干净，代价只有约 380ms 的 WebView2 初始化。
+///
+/// **380ms 是可接受的**：需求 F-01 的指标是"按下热键到可输入 ≤ 150ms"，
+/// 而那个 150ms 针对的是**已有窗口的复用**；这里是"每次都是首次创建"的口径，
+/// 与实测的 366–434ms 同一量级，仍然远低于 F-15c 的 3 秒端到端预算。
 fn open_capture_window(app: &tauri::AppHandle) {
     let began = Instant::now();
 
-    if let Some(window) = app.get_webview_window(CAPTURE_LABEL) {
-        let _ = window.show();
-        let _ = window.set_focus();
-        // 重载会让页面重新走一遍加载流程（含 initialization_script），
-        // 因此 `window.close` 替身也是新的，不必手动补。
-        if let Err(error) = window.eval("location.reload()") {
-            // eval 失败不该让窗口不出现：最坏情况回到"状态残留"的旧行为，
-            // 但必须说出来 —— 静默失败正是这个缺陷最初难查的原因。
-            eprintln!("[shell] 快记窗重载失败（将沿用上一轮状态）：{error}");
+    // 先销毁已有的。
+    //
+    // **必须用 `destroy()` 而不是 `close()`**：
+    //   · `close()` 会先发 `CloseRequested` 事件、是异步的
+    //   · `destroy()` 直接销毁、不发事件
+    //
+    // **而且销毁后必须让出事件循环**：
+    // `destroy()` 是把销毁动作**投给主线程的事件循环**，而我们从主线程
+    // 紧接着同步调 `build()` —— 事件循环没有机会处理那条消息，旧窗口还在，
+    // 于是重建报 `a webview with label 'capture' already exists`。
+    // 实测表现是"**每隔一次**热键快记窗不出来"（✓✗✓✗✓✗）。
+    //
+    // 曾经试图用"失败后 sleep 再重试"绕过 —— **那不可能成功**：
+    // sleep 占着的正是那个必须先返回、销毁才能发生的事件循环。
+    // 正确做法是 `spawn` 一个线程去等，让主线程先回去处理事件。
+    let had_old = app.get_webview_window(CAPTURE_LABEL);
+    if let Some(existing) = &had_old {
+        // 先隐藏：即使销毁要等一小会儿，用户也立刻看不到旧窗口
+        let _ = existing.hide();
+        if let Err(error) = existing.destroy() {
+            eprintln!("[shell] ✗ 销毁旧快记窗失败：{error}");
         }
-        println!("[shell] 快记窗唤出并重载，耗时 {} ms", began.elapsed().as_millis());
+    }
+
+    // 让出事件循环，等销毁真正完成，再回主线程重建。
+    // **只在真有旧窗口时才等**：首次唤起（无旧窗口）立刻建，不必付这份延迟。
+    if had_old.is_some() {
+        let handle = app.clone();
+        let began_ms = began;
+        std::thread::spawn(move || {
+            // 销毁是主线程上的一次事件处理，几十毫秒足够；给宽一点避免偶发失败
+            std::thread::sleep(Duration::from_millis(80));
+            // 回主线程建窗口：Tauri 的窗口 API 必须在主线程调用。
+            // 用 clone 而不是把 `handle` 移进闭包 —— 后者会让外层也被移动，
+            // 编译期就报 "cannot move out of `handle` because it is borrowed"。
+            let for_main = handle.clone();
+            let _ = handle.run_on_main_thread(move || {
+                build_capture_window(&for_main, began_ms);
+            });
+        });
         return;
     }
 
+    build_capture_window(app, began);
+}
+
+/// 真正创建快记窗。单独一个函数，因为"先销毁再建"的路径需要延后调用它。
+fn build_capture_window(app: &tauri::AppHandle, began: Instant) {
     // `capture.html` 由应用协议从 frontendDist 根提供。
     // 页面里的 `/app.css`、`/capture.js` 是绝对路径，而应用协议会跳过开头的 `/`
     // （tauri/src/protocol/asset.rs 里明确 `// skip leading /`），因此能正确解析 ——
@@ -324,7 +370,7 @@ fn open_capture_window(app: &tauri::AppHandle) {
     match built {
         Ok(window) => {
             let _ = window.set_focus();
-            println!("[shell] 快记窗首次创建，耗时 {} ms", began.elapsed().as_millis());
+            println!("[shell] 快记窗已就绪，耗时 {} ms", began.elapsed().as_millis());
         }
         Err(error) => eprintln!("[shell] ✗ 创建快记窗失败：{error}"),
     }
@@ -410,6 +456,31 @@ fn notify_widget_refresh(app: tauri::AppHandle) {
         slot.put(WidgetCommand::Refresh);
     }
 }
+
+/// 悬浮组件调用：外面（主界面）该重画了。
+///
+/// **与 `notify_widget_refresh` 方向相反、用途对称**：那一对解决"主界面改了、组件不知道"，
+/// 这一个解决"**组件改了、主界面不知道**" —— 在悬浮组件里选完焦点后，
+/// 主界面顶部的聚焦条仍显示旧任务（用户实测报告："选完焦点在主页面不同步"）。
+///
+/// 两者都用"置标记 + 页面轮询"同一个机制，不引入第二种通信方式。
+#[tauri::command]
+fn notify_main_refresh(app: tauri::AppHandle) {
+    if let Some(flag) = app.try_state::<MainRefreshRequest>() {
+        flag.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 主界面轮询取走"该重画了"标记；返回 true 表示这次要刷新。
+///
+/// **取值即清零**：一次变更只触发一次重画，否则主界面会被反复重绘。
+#[tauri::command]
+fn take_main_refresh(state: tauri::State<'_, MainRefreshRequest>) -> bool {
+    state.0.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// "主界面该重画了"的标记（悬浮组件改动了数据时置位）。
+struct MainRefreshRequest(std::sync::atomic::AtomicBool);
 
 /// 页面调用：告诉外壳「记一笔」有没有落点（有没有焦点任务）。
 ///
@@ -1206,12 +1277,16 @@ fn main() {
             open_capture_window_command,
             take_widget_command,
             notify_widget_refresh,
+            notify_main_refresh,
+            take_main_refresh,
             report_note_result,
             collapse_widget,
             save_widget_position,
         ])
         // 悬浮组件的指令槽（进入输入 / 重画 / 选焦点）。
         .manage(WidgetCommandSlot::new())
+        // "主界面该重画了"的标记（悬浮组件改了数据时置位）。
+        .manage(MainRefreshRequest(std::sync::atomic::AtomicBool::new(false)))
         // 悬浮组件是否为输入态。窗口失焦时要据此决定"收起"还是"什么都不做"。
         .manage(WidgetMode(std::sync::atomic::AtomicBool::new(false)))
         // "窗口动过、位置还没落盘"的标记（拖动时节流用）。

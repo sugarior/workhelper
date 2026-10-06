@@ -102,10 +102,9 @@ let candidateIndex = 0;
 /**
  * 进入"选一个焦点"模式。
  *
- * **为什么需要它**：原来没有焦点任务时只是显示一句"还没有聚焦的任务" ——
- * 那是**被动反抗**：用户按了热键，系统说"你做不了"。
- * 而那一刻用户的本意是"我要记一笔"，缺的只是一个聚焦目标，
- * 因此这里直接把缺的那一步补上（用户提议）。
+ * **两个入口都走这里**（用户要求）：
+ *   · 按热键时**还没有**焦点任务 —— 把缺的那一步补上
+ *   · **点击小条上的任务名** —— 随时换一件（原来只能在无焦点时才能换）
  *
  * 候选数据来自 `focusCandidates()` —— **与主界面聚焦条的下拉同一份**
  * （同一个服务方法、同一个口径：排入今日 + 截止日已到 + 当前焦点例外）。
@@ -120,11 +119,13 @@ async function enterPickMode() {
     return;
   }
   candidates = list;
-  // 默认落在第一条（内核已按"当前焦点 → 进行中 → 待办"排好序，
-  // 没有焦点时第一条就是最该做的那个）
-  candidateIndex = 0;
+  // 默认落在当前焦点那一条上，而不是第一条 ——
+  // 用户点开多半是想换，从"我现在这条"开始移动比从列表头开始更顺手。
+  const current = list.findIndex((item) => item.isFocused);
+  candidateIndex = current >= 0 ? current : 0;
   document.body.classList.add('mode-pick');
   renderCandidates();
+  document.querySelector('.pick-item.active')?.scrollIntoView({ block: 'nearest' });
 }
 
 function exitPickMode() {
@@ -172,8 +173,9 @@ async function confirmPick(index) {
     return;
   }
   await refresh();
-  // 让主界面也知道焦点变了：它顶部的聚焦条同样要跟着改
-  void invokeShell('notify_widget_refresh');
+  // **让主界面也知道焦点变了**（用户实测报告："选完焦点在主页面不同步"）：
+  // 主界面顶部的聚焦条显示的是同一个焦点，不同步就会两处不一致。
+  void invokeShell('notify_main_refresh');
   enterInputMode();
 }
 
@@ -252,17 +254,19 @@ function startPolling() {
         return;
       }
 
-      // CMD.ENTER_INPUT：用户想记一笔。
+      // CMD.ENTER_INPUT：用户想记一笔（热键或「展开」按钮）。
       // **有没有焦点任务决定了它的两种结果**，而这个判断只有页面能做：
       //   有焦点 → 直接进输入态（热键的本意就是"记一句"）
       //   没焦点 → 弹出选焦点（否则用户按了键却做不了任何事）
+      //
+      // 想在**有**焦点时换一件，点小条上的任务名（见下面的 pickButton 绑定）。
       await refresh();
       if (hasFocus) {
         enterInputMode();
         void reportResult(true);
       } else {
         void reportResult(false);
-        enterPickMode();
+        await enterPickMode();
       }
     })();
   }, 150);
@@ -332,6 +336,21 @@ saveButton.addEventListener('click', () => void submit());
 // 展开按钮：把小条变成输入态。
 // 与热键走**同一个函数**，因此不存在"鼠标点了与键盘按了行为不一致"的可能。
 expandButton.addEventListener('click', () => enterInputMode());
+
+/**
+ * 点任务名 → 打开选焦点栏（用户要求）。
+ *
+ * **为什么这个入口是必要的**：热键在**有**焦点时直接进输入态（那是它的本意），
+ * 于是"想换一件"就没有入口了 —— 原来只能先去主界面取消聚焦，绕一大圈。
+ * 任务名本身就是那个"我在做哪件"的显示，点它去改是**最自然的指向**。
+ *
+ * 它在拖动区里（`data-tauri-drag-region="deep"`），但按钮/可点元素默认
+ * 阻止拖动，因此点它不会变成拖窗口 —— 两者不冲突。
+ */
+taskLabel.addEventListener('click', () => void enterPickMode());
+// 用光标形状说明它可点：不然没人会去试
+taskLabel.style.cursor = 'pointer';
+taskLabel.title = '点击切换聚焦任务';
 
 // 说明：**拖动与位置保存不在这里**。
 // 拖动由 Tauri 的 `data-tauri-drag-region="deep"` 交给操作系统处理，
