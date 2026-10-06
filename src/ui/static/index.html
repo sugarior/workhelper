@@ -4,7 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WorkHelper 工作秘书</title>
-  <link rel="stylesheet" href="/app.css">
+  <!-- 版本参数必须覆盖所有静态资源（见 capture.html 里的说明：
+       此前只有 .js 带版本，改 CSS 后界面仍用旧样式） -->
+  <link rel="stylesheet" href="/app.css?v=0.12.0">
 </head>
 <body>
   <header class="top">
@@ -40,6 +42,6 @@
 
   <!-- 带版本参数：换了版本号浏览器就会重新拉取，即使此前缓存过。
        服务端同时发送 no-cache，两者叠加确保改完前端必定生效。 -->
-  <script type="module" src="/app.js?v=0.11.0"></script>
+  <script type="module" src="/app.js?v=0.12.0"></script>
 </body>
 </html>

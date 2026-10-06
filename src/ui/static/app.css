@@ -252,43 +252,100 @@ ul.list > li:hover { background: var(--bg-soft); }
 
 textarea.log-body { width: 100%; min-height: 190px; resize: vertical; font-family: inherit; }
 
-/* ---------- 快记窗 ---------- */
+/* ---------- 快记窗 ----------
+   形态目标：**Windows 对话框**。
+   三条让它像窗口而不是"一段裸内容"的关键：
+     1. 一条**带标题的栏**（不是只有角落一个关闭按钮）
+     2. 右端**方形**关闭按钮，紧贴栏的右上角
+     3. 整体**紧凑**：对话框不是网页，垂直方向不铺开
+   正文区用 flex 自适应剩余高度，因此窗口尺寸变化时不会出现滚动条。 */
 
 body.capture {
   background: var(--bg-raised);
-  padding: 16px;
   min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  /* 对话框四边留白很小 —— 这是"紧凑"最直接的体现 */
+  padding: 0;
 }
 
-.capture-card { max-width: 620px; margin: 0 auto; }
+.capture-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* 视觉上把标题栏与内容分开，但不画整条边框，保持轻 */
+  border-bottom: 1px solid var(--border);
+  padding: 0 0 0 12px;
+  flex: 0 0 auto;
+  /* 标题栏可拖动：对话框的通用行为，抓手感 */
+  user-select: none;
+}
+
+.capture-title {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+/* 关闭按钮：方形、贴右上角、平时低调、悬停才变红
+   —— Windows 的关闭按钮就是"平时不显眼、指上去才表态" */
+.capture-close {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.capture-close:hover { background: #d64545; color: #fff; }
+.capture-close:active { background: #b93a3a; color: #fff; }
+
+/* 正文区自适应剩余高度 */
+.capture-card {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px 8px;
+}
 
 .capture-input {
   width: 100%;
-  min-height: 84px;
-  resize: vertical;
+  /* 由 flex 决定高度，不许用户拖拽改变 —— 对话框尺寸固定 */
+  flex: 1 1 auto;
+  min-height: 0;
+  resize: none;
   font-size: 15px;
-  padding: 11px 13px;
+  line-height: 1.5;
+  padding: 9px 11px;
 }
 
-.chips { display: flex; gap: 7px; margin: 10px 0; align-items: center; }
+.chips { display: flex; gap: 6px; margin: 8px 0 0; align-items: center; flex: 0 0 auto; }
 .chip {
   border: 1px solid var(--border);
   background: var(--bg-soft);
-  border-radius: 14px;
-  padding: 3px 13px;
+  /* 方角比胶囊更接近 Windows 控件 */
+  border-radius: 4px;
+  padding: 3px 12px;
   cursor: pointer;
   color: var(--text-dim);
 }
 .chip.selected { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
 
-.parse-hint { min-height: 22px; font-size: 13px; }
-.parse-hint .tag { font-size: 12px; }
+/* 解析提示只占一行，没有内容时不占高度（min-height 让位置不跳动） */
+.parse-hint { min-height: 18px; font-size: 12px; margin-top: 4px; flex: 0 0 auto; }
+.parse-hint .tag { font-size: 11px; }
 .parse-hint .title-preview { color: var(--text-dim); }
 
-.capture-actions { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
-.capture-actions .hint { color: var(--text-dim); font-size: 12px; }
+.capture-actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; flex: 0 0 auto; }
+.capture-actions .hint { color: var(--text-dim); font-size: 11px; }
 
-.error-line { color: var(--danger); font-size: 13px; min-height: 19px; margin-top: 6px; }
+.error-line { color: var(--danger); font-size: 12px; min-height: 16px; margin-top: 3px; flex: 0 0 auto; }
 
 .saved-toast {
   position: fixed;
@@ -303,30 +360,6 @@ body.capture {
   transition: opacity 0.2s;
 }
 .saved-toast.show { opacity: 1; }
-
-/* 兜底关闭按钮。
-   快记窗是无边框浮窗，没有标题栏与系统关闭按钮；而"保存后自动收起"与 Esc
-   都依赖页面脚本正常工作。脚本一旦出问题就没有任何关闭途径 —— 实测遇到过一次，
-   只能去杀进程。这个按钮是那道兜底。 */
-.capture-close {
-  position: fixed;
-  top: 6px;
-  right: 8px;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: #d64545;
-  color: #fff;
-  font-size: 16px;
-  line-height: 1;
-  cursor: pointer;
-  opacity: 0.85;
-  z-index: 10;
-}
-.capture-close:hover { opacity: 1; background: #c03434; }
-.capture-close:active { transform: scale(0.94); }
 
 .closing { animation: collapse 0.3s ease-in forwards; }
 @keyframes collapse {

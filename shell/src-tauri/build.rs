@@ -32,5 +32,16 @@ fn main() {
     println!("cargo:rerun-if-changed={}", entry.display());
     println!("cargo:rustc-env=WORKHELPER_REPO_ROOT={}", repo_root.display());
 
+    // **界面静态资源也要声明依赖** —— 否则改 HTML/CSS/JS 后 cargo 不重跑本脚本，
+    // 界面仍用上一次嵌入的旧资源。实测踩到：改了快记窗的样式与结构，
+    // 重新 `cargo build` 后界面毫无变化，用 CDP 查 DOM 才确认
+    // 应用协议提供的还是旧 HTML（连 `<title>` 都是旧的）。
+    //
+    // 这类"改了没生效"最难查的方向是去怀疑浏览器缓存 —— 实际是构建依赖没声明。
+    // 因此这里把整个 frontendDist 目录纳入依赖（Tauri 的 `tauri build` 会处理，
+    // 但直接用 `cargo build` 不会）。
+    let static_dir = repo_root.join("src").join("ui").join("static");
+    println!("cargo:rerun-if-changed={}", static_dir.display());
+
     tauri_build::build()
 }

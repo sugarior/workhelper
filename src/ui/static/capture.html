@@ -4,14 +4,22 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>快记 · WorkHelper</title>
-  <link rel="stylesheet" href="/app.css">
+  <!-- 样式与脚本都带版本参数：**缓存失效必须覆盖所有静态资源**。
+       此前只有 capture.js 带版本，于是改了 CSS 之后 WebView 仍用旧样式 ——
+       表现成"改了半天样式没生效"，而磁盘上的文件其实是新的（已用 CDP 查实）。 -->
+  <link rel="stylesheet" href="/app.css?v=0.12.0">
 </head>
 <body class="capture">
-  <!-- 兜底关闭按钮：快记窗是无边框的**浮窗**，没有标题栏与系统关闭按钮，
-       而"保存后自动收起"与 Esc 都依赖页面脚本正常。
-       一旦脚本出问题，没有这个按钮就**只能去杀进程** —— 实测遇到过一次。
-       放在页面而不是由外壳注入：浏览器与桌面壳两种环境下都自然可用。 -->
-  <button id="close" class="capture-close" title="关闭（Esc）" aria-label="关闭">×</button>
+  <!-- 标题栏。Windows 弹窗的形态标志不是"角落里有个关闭按钮"，
+       而是**一条带标题的栏 + 右端方形关闭按钮** —— 没有它，浮窗看起来
+       像一段裸内容而不是一个窗口。 -->
+  <div class="capture-titlebar">
+    <span class="capture-title">记一句</span>
+    <!-- 兜底关闭：浮窗没有系统标题栏，而"保存后自动收起"与 Esc 都依赖页面脚本；
+         脚本一旦失效就没有任何关闭途径（实测遇到过一次，只能去杀进程）。 -->
+    <button id="close" class="capture-close" title="关闭（Esc）" aria-label="关闭">✕</button>
+  </div>
+
   <div class="capture-card">
     <textarea id="text" class="capture-input" autofocus
       placeholder="记一句…（Enter 保存，Shift+Enter 换行，Esc 取消）"></textarea>
@@ -34,6 +42,6 @@
     <div class="error-line" id="error"></div>
   </div>
 
-  <script type="module" src="/capture.js?v=0.11.0"></script>
+  <script type="module" src="/capture.js?v=0.12.0"></script>
 </body>
 </html>
