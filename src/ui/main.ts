@@ -104,8 +104,7 @@ async function main(): Promise<void> {
   const server = await startServer(args);
 
   const base = `http://127.0.0.1:${server.port}`;
-  console.log(`WorkHelper 界面服务已启动`);
-  console.log(`  主界面   ${base}/`);
+  console.log(`WorkHelper 界面服务已启动`);  console.log(`  主界面   ${base}/`);
   console.log(`  快记窗   ${base}/capture`);
   console.log(`  数据库   ${server.dbPath}`);
   console.log(`  数据目录 ${server.dataDir}`);

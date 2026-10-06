@@ -1,9 +1,0 @@
-# 把编译产物放到 D 盘。
-#
-# 为什么必须显式配置：Tauri 首次编译会拉几百个 crate，target/ 会涨到 2-4GB，
-# 而 C 盘只剩 25GB 左右。默认位置是 shell/src-tauri/target（在 C 盘上，
-# 因为项目位于 D: 但 %USERPROFILE%\.cargo 在 C:）——
-# 这里直接指到 D 盘的独立目录，避免把系统盘塞满。
-
-[build]
-target-dir = "D:/cargo-target/workhelper-shell"

@@ -1,0 +1,12 @@
+# 把 Rust 编译产物固定到 D 盘。
+#
+# 为什么放在**仓库根**而不是 shell/ 下：`.cargo/config.toml` 是按
+# **当前工作目录**向上查找的，而 `cargo build --manifest-path shell/...`
+# 从仓库根调用时不会读到 shell/.cargo/config.toml —— 于是产物落回
+# `<manifest>/target`（C 盘），白占 2.5GB，还让人对着旧二进制调试。
+# 放在根目录则两种调用方式都生效。
+#
+# 为什么必须指走：Tauri 首次编译会产生 2-4GB，而 C 盘空间紧张。
+
+[build]
+target-dir = "D:/cargo-target/workhelper-shell"
