@@ -2006,13 +2006,10 @@ export function materialFoldRow(type, id) {
 
 /** 设置页的渲染。 */
 export async function renderSettings(root) {
-  let shell = null;
+  const outcome = await loadShellSettings();
   let dayBoundaryHour = null;
   try {
-    [shell, dayBoundaryHour] = await Promise.all([
-      shellSettings(),
-      api.dayBoundaryHour(),
-    ]);
+    dayBoundaryHour = await api.dayBoundaryHour();
   } catch (error) {
     mount(root, [
       el('h2', {}, '设置'),
@@ -2021,7 +2018,7 @@ export async function renderSettings(root) {
     return;
   }
 
-  if (shell === null) {
+  if (outcome.kind === 'none') {
     // 浏览器里开发时没有外壳。**明说**而不是显示一堆不可用的控件 ——
     // 那会让人以为"这些设置坏了"。
     mount(root, [
@@ -2037,6 +2034,24 @@ export async function renderSettings(root) {
     return;
   }
 
+  if (outcome.kind === 'timeout') {
+    // **有外壳，但它没回话**。这与"没有外壳"是两回事，不能显示成同一句 ——
+    // 否则用户会以为"这些设置在浏览器里本来就没有"，而真相是外壳出了问题。
+    // 数据侧的那一项仍然显示（它不经过外壳，已经取到了）。
+    mount(root, [
+      el('h2', {}, '设置'),
+      el('div', { class: 'empty' },
+        '外壳没有回话，因此热键、悬浮组件、开机自启这几项暂时读不到。'
+        + '数据侧的设置仍然可用；可以稍后重开这一页再试。'),
+      el('div', { class: 'settings-group' }, [
+        el('h3', {}, '数据'),
+        boundaryRow(dayBoundaryHour, root),
+      ]),
+    ]);
+    return;
+  }
+
+  const shell = outcome.value;
   mount(root, [
     el('h2', {}, '设置'),
 
@@ -2177,11 +2192,20 @@ function hotkeyRow(label, keys) {
   ]);
 }
 
-/** 读外壳设置。浏览器里返回 null（没有外壳）。 */
-async function shellSettings() {
-  if (!inShell()) return null;
+/**
+ * 读外壳设置，**区分三种结果**。
+ *
+ * 只返回 `null | 值` 是不够的：`null` 既可能是"浏览器里没有外壳"，
+ * 也可能是"有外壳但没回话"（`invokeShell` 超时后返回 undefined）。
+ * 两者对用户的意义完全不同 —— 前者正常，后者是故障。
+ * 合成一种会让设置页在出故障时显示"浏览器里开发时不显示这些"，
+ * 那是在把故障说成正常。
+ */
+async function loadShellSettings() {
+  if (!inShell()) return { kind: 'none' };
   const value = await invokeShell('get_shell_settings');
-  return value ?? null;
+  if (value === undefined || value === null) return { kind: 'timeout' };
+  return { kind: 'ok', value };
 }
 
 /** 改一项外壳设置，返回生效后的真实值。 */

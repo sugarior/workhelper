@@ -948,6 +948,110 @@ fn apply_shell_settings(app: &tauri::AppHandle) {
     );
 }
 
+/// 内核看门狗（需求 §8 的健壮性要求）。
+///
+/// **没有它会怎样**（用户实测报告过）：内核进程一旦死掉（被杀、崩溃），
+/// 外壳与窗口**都还活着**，但界面再也取不到数据 ——
+/// 而且**不重启、不提示**，看上去就是"程序坏了"。
+/// 实测状态：外壳还有 `msedgewebview2` 子进程、端口 7317 没人监听、
+/// 页面每个请求都失败。用户只能自己想到"重开一次程序"。
+///
+/// 这里做两件事：**发现** + **重启**（重启同时恢复了对用户的可用性）。
+///
+/// **为什么加冷却时间**：若内核因为某个必然原因起不来（例如数据库损坏、
+/// 端口被别的程序占着），无限重启会变成每秒一次的循环 ——
+/// 那比原来更糟（持续写日志、持续占 CPU）。冷却让失败退化成"每 30 秒试一次"。
+fn spawn_kernel_watchdog(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        // 3 秒一次：够快（用户几乎察觉不到中断），也不会造成可观的空转
+        const CHECK_INTERVAL: Duration = Duration::from_secs(3);
+        // 两次重启尝试之间的最小间隔
+        const RESTART_COOLDOWN: Duration = Duration::from_secs(30);
+
+        let mut last_restart: Option<Instant> = None;
+
+        loop {
+            std::thread::sleep(CHECK_INTERVAL);
+
+            let Some(state) = handle.try_state::<NodeServer>() else {
+                return;
+            };
+
+            // 取"内核是否已退出"，同时把已退出的 child 收掉（避免僵尸进程）
+            let exited = {
+                let Ok(mut guard) = state.0.lock() else {
+                    return;
+                };
+                match guard.as_mut() {
+                    // `try_wait` 返回 Ok(Some(..)) 表示已退出
+                    Some(child) => match child.try_wait() {
+                        Ok(Some(status)) => {
+                            println!("[shell] ⚠ 内核已退出（{status}），准备重启");
+                            *guard = None;
+                            true
+                        }
+                        // 还活着；`Err` 说明句柄出问题，按"活着"处理，
+                        // 免得因为一次取状态失败就把好内核当成坏的
+                        Ok(None) | Err(_) => false,
+                    },
+                    // **没有子进程句柄**：说明启动时端口上已有服务在跑，
+                    // 我们复用了它（没有自己拉起）。这正是用户实测到的情形 ——
+                    // 那种情况下**没有 child 可看**，只能靠端口判断死活。
+                    // 少了这一支，看门狗在最需要它的场景里什么都不做。
+                    None => !port_in_use(),
+                }
+            };
+
+            if !exited {
+                continue;
+            }
+
+            // 冷却：刚重启过就别急着再试
+            if let Some(when) = last_restart {
+                if when.elapsed() < RESTART_COOLDOWN {
+                    continue;
+                }
+            }
+
+            let Some(paths) = handle.try_state::<KernelPaths>() else {
+                eprintln!("[shell] ✗ 看门狗拿不到内核路径，无法重启");
+                return;
+            };
+            last_restart = Some(Instant::now());
+
+            match spawn_kernel(&paths.0) {
+                Ok(child) => {
+                    println!("[shell] 内核已重启，PID = {}", child.id());
+                    // 放回状态，这样退出时还能收掉它
+                    if let Ok(mut guard) = state.0.lock() {
+                        *guard = Some(child);
+                    }
+                    // 等它监听端口；页面自己的请求会在这之后自然恢复，
+                    // 因此不需要额外通知界面（重试是页面本来就有的行为）
+                    match wait_until_ready(Instant::now()) {
+                        Ok(elapsed) => println!(
+                            "[shell] 内核重启后就绪，耗时 {} ms",
+                            elapsed.as_millis()
+                        ),
+                        Err(message) => eprintln!("[shell] ✗ 重启的内核未就绪：{message}"),
+                    }
+                    // 界面顶部的数据是旧的（内核死前那份），请它重画一次
+                    if let Some(slot) = handle.try_state::<MainRefreshRequest>() {
+                        slot.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                Err(message) => {
+                    eprintln!("[shell] ✗ 内核重启失败：{message}（{RESTART_COOLDOWN:?} 后重试）");
+                }
+            }
+        }
+    });
+}
+
+/// 内核的运行时路径（看门狗重启时要重新拉起内核，因此得留着）。
+struct KernelPaths(RuntimePaths);
+
 /// 数据目录的只读视图（`get_shell_settings` 要报给界面看）。
 struct DataDirView(String);
 
@@ -1233,6 +1337,7 @@ fn focus_widget_input(app: &tauri::AppHandle) {
 }
 
 /// 内存中的运行时路径解析结果。
+#[derive(Clone)]
 struct RuntimePaths {
     /// 内核源码树所在目录（含 `src/ui/main.ts` 的那一级）
     kernel_root: PathBuf,
@@ -1730,6 +1835,8 @@ fn main() {
     let config_for_state = paths.config.clone();
     let config_root_for_state = paths.config_root.clone();
     let data_dir_for_state = paths.data_dir.to_string_lossy().to_string();
+    // 看门狗要用它在重启时重新拉起内核。`RuntimePaths` 已经派生了 Clone。
+    let paths_for_watchdog = paths.clone();
 
     // 端口已被占用时不重复拉起 —— 内核是单实例设计，
     // 第二个进程会因端口冲突失败（或更糟：两个进程写同一个库）
@@ -1807,6 +1914,8 @@ fn main() {
         ])
         // 数据目录的只读视图（设置页要显示"数据存在哪"）。
         .manage(DataDirView(data_dir_for_state))
+        // 看门狗重启内核时要重新拉起它，因此路径得留着。
+        .manage(KernelPaths(paths_for_watchdog))
         // 托盘要求主窗口切到的页签（页面轮询取走）。
         .manage(PendingTab(std::sync::Mutex::new(None)))
         // 悬浮组件的指令槽（进入输入 / 重画 / 选焦点）。
@@ -1833,6 +1942,10 @@ fn main() {
             // 关闭替身由 WebviewWindowBuilder 的 initialization_script 注入
             // （见 open_capture_window 的说明）—— 必须早于页面脚本，
             // 因此不能放在这里 eval。
+
+            // 内核看门狗：内核死了要**自己重启**，而不是留一个静静失效的界面
+            // （用户实测报告过："关了内核的命令行之后程序就一直坏着"）。
+            spawn_kernel_watchdog(app.handle());
 
             // 系统托盘（需求 F-16）。**它是"常驻桌面"这个形态的关键一环**：
             // 没有它，"关闭主窗口不退出进程"就无从谈起。
