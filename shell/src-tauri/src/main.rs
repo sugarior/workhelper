@@ -252,6 +252,20 @@ fn hide_capture_window(window: tauri::WebviewWindow) -> Result<(), String> {
     window.hide().map_err(|e| e.to_string())
 }
 
+/// 页面调用：打开快记窗（主界面「＋ 快记」按钮）。
+///
+/// **为什么需要这个命令**：那个按钮原来用 `window.open('/capture', ...)` ——
+/// 在浏览器里能用，**在 Tauri 的 WebView 里被拦截**（Tauri 默认不允许网页开新窗口），
+/// 于是表现成"点了没反应"。这正是第 1 类错误的形态：
+/// 同一件事在两种环境下走了两条不同的路，其中一条在外壳里根本不通。
+///
+/// 改为调这个命令，与热键**走同一个 `open_capture_window`** ——
+/// 于是"按钮"与"热键"是同一个动作的两个位置，不是两套实现（需求 F-01/F-05）。
+#[tauri::command]
+fn open_capture_window_command(app: tauri::AppHandle) {
+    open_capture_window(&app);
+}
+
 /// 打开快记窗：不存在就建（走应用协议 + 注入关闭替身），存在就显示并**重载页面**。
 ///
 /// **必须走应用协议**（`WebviewUrl::App`）而不是外部 http 地址 ——
@@ -330,19 +344,71 @@ fn request_note_input(app: &tauri::AppHandle) {
     focus_widget_input(app);
 }
 
-/// 「记一笔」热键被按下、等着页面来取。
+/// 外壳发给悬浮组件的指令。
 ///
-/// 用 `AtomicBool` 而不是 `Mutex<bool>`：它只有"置位/取值并清零"这一个用法，
-/// 原子量语义更直接，也不会因为忘记解锁而卡住。
-struct NoteRequest(std::sync::atomic::AtomicBool);
+/// **为什么是一个枚举而不是几个 `AtomicBool`**：本项目已经栽过"同一类东西
+/// 用两种机制传"的跟头（快记窗那三个静默失败的方案）。一个通道传所有指令，
+/// 将来加指令只需加一个枚举值，不会出现两个标志互相打架、或页面漏读其中一个。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WidgetCommand {
+    /// 进入「记一笔」输入态（热键或展开按钮触发）
+    EnterInput,
+    /// 只重画数据，不动形态（焦点变了、数据变了）
+    Refresh,
+    /// 当前没有焦点任务，请页面弹出"选一个焦点"
+    PickFocus,
+}
 
-/// 页面调用：取走「记一笔」请求。返回 true 表示这次该聚焦输入框。
+impl WidgetCommand {
+    /// 转成数字给页面。页面侧只认这几个数 —— 两边靠**同一张表**对照，
+    /// 因此这里和 widget.js 里的常量必须一起改（注释已互相指明）。
+    fn code(self) -> u8 {
+        match self {
+            WidgetCommand::EnterInput => 1,
+            WidgetCommand::Refresh => 2,
+            WidgetCommand::PickFocus => 3,
+        }
+    }
+}
+
+/// 「等着悬浮组件来取」的指令槽。
 ///
-/// **取值即清零**（`swap(false)`）—— 这样一次按键只生效一次；
-/// 若只读不清，页面每次轮询都会重复聚焦，用户就没法用鼠标去别处。
+/// **取值即清零**（`swap`）—— 这样一次指令只生效一次；
+/// 若只读不清，页面每次轮询都会重复执行（例如反复把焦点抢进输入框）。
+struct WidgetCommandSlot(std::sync::atomic::AtomicU8);
+
+impl WidgetCommandSlot {
+    fn new() -> Self {
+        Self(std::sync::atomic::AtomicU8::new(0))
+    }
+
+    fn put(&self, command: WidgetCommand) {
+        self.0.store(command.code(), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn take(&self) -> u8 {
+        self.0.swap(0, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// 页面调用：取走一条待执行的指令；0 表示没有。
 #[tauri::command]
-fn take_note_request(state: tauri::State<'_, NoteRequest>) -> bool {
-    state.0.swap(false, std::sync::atomic::Ordering::SeqCst)
+fn take_widget_command(state: tauri::State<'_, WidgetCommandSlot>) -> u8 {
+    state.take()
+}
+
+/// 主界面调用：数据变了，请悬浮组件重画（焦点切换、取消聚焦、记完一笔等）。
+///
+/// **为什么由主界面主动通知**：悬浮组件只在加载时刷新一次，之后不会自己知道
+/// 外面发生了什么。而"主界面切了焦点、组件还显示旧任务"是必然会遇到的。
+///
+/// 用"外壳转发"而不是让两个窗口直接通信：外壳本来就是唯一知道所有窗口的东西，
+/// 让页面之间互相找对方会引入"谁先启动"这类时序问题。
+#[tauri::command]
+fn notify_widget_refresh(app: tauri::AppHandle) {
+    if let Some(slot) = app.try_state::<WidgetCommandSlot>() {
+        slot.put(WidgetCommand::Refresh);
+    }
 }
 
 /// 页面调用：告诉外壳「记一笔」有没有落点（有没有焦点任务）。
@@ -451,13 +517,15 @@ fn set_widget_visible(app: &tauri::AppHandle, visible: bool) {
 
 /// 悬浮窗尺寸。
 ///
-/// **固定不随形态变化**：idle（细栏）与 input（展开）用同一个窗口尺寸，
-/// 切换只改 CSS 类，**不改窗口尺寸** —— 后者要走外壳，对高频动作太慢，
-/// 而且每次都要重算位置（放大时该往哪边扩？）。
-/// 代价是 idle 时窗口下方有一片透明区域 —— 因为根元素透明、且
-/// 那条细栏在最上方，视觉上就是"只有一条细栏"。
+/// **固定不随形态变化**：idle（细栏）、input（展开）、pick（选焦点）三种形态
+/// 用同一个窗口尺寸，切换只改 CSS 类，**不改窗口尺寸** ——
+/// 后者要走外壳，对高频动作太慢，而且每次都要重算位置（放大时该往哪边扩？）。
+///
+/// 代价是 idle 时窗口下方有一大片透明区域。因为根元素透明、且那条细栏在最上方，
+/// 视觉上就是"只有一条细栏"，代价只是那一片区域不响应桌面点击。
+/// 取 260 高是为了让「选焦点」最多显示 5 项而不滚动（`WIDGET_PICK_MAX`）。
 const WIDGET_W: f64 = 360.0;
-const WIDGET_H: f64 = 104.0;
+const WIDGET_H: f64 = 260.0;
 
 /// 距屏幕边缘的默认留白（首次运行、尚未拖过时把组件放在右下角）。
 const WIDGET_MARGIN: f64 = 24.0;
@@ -546,10 +614,15 @@ fn create_widget_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, 
     Ok(window)
 }
 
-/// 让悬浮组件进入「记一笔」输入态并获取焦点。
+/// 让悬浮组件响应「记一笔」热键并获取焦点。
 ///
 /// **只有用户按下热键才会走到这里** —— 组件自己从不主动抢焦点（F-17）。
-/// 因此这个函数里的 `set_focus` 是"响应用户意图"，不是"抢"。
+/// 因此这里（以及调用方）的 `set_focus` 是"响应用户意图"，不是"抢"。
+///
+/// **发的是 `EnterInput` 而不是"输入态"这个最终形态**：
+/// 有没有焦点任务只有页面知道，因此由页面决定
+/// "进输入态"还是"先弹出选焦点"（见 widget.js）。
+/// 外壳不替它判断 —— 那会变成同一件事在两处各判一次。
 fn focus_widget_input(app: &tauri::AppHandle) {
     let window = match app.get_webview_window(WIDGET_LABEL) {
         Some(window) => window,
@@ -562,25 +635,16 @@ fn focus_widget_input(app: &tauri::AppHandle) {
         },
     };
 
-    if let Some(state) = app.try_state::<ShellState>() {
-        if let Some(mode) = app.try_state::<WidgetMode>() {
-            mode.set(true);
-        }
-        let _ = &state;
-    }
-
-    // 置标记：页面轮询取走后进入输入态。
-    // 复用「记一笔」那一套（take_note_request），因此主窗口与悬浮组件
-    // **共用同一条通路**，不新增第二种通知方式。
-    if let Some(state) = app.try_state::<NoteRequest>() {
-        state.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(slot) = app.try_state::<WidgetCommandSlot>() {
+        slot.put(WidgetCommand::EnterInput);
+    } else {
+        eprintln!("[shell] ✗ 记一笔：指令槽未注册（内部错误）");
     }
 
     // 隐藏状态下也要能唤出（用户确认）：否则藏起来后记一笔就没入口了
     let _ = window.show();
     // `focused(false)` 建出来的窗口不会自己抢焦点，这里显式给 —— 用户按了热键
     let _ = window.set_focus();
-    println!("[shell] 记一笔：悬浮组件已进入输入态");
 }
 
 /// 内存中的运行时路径解析结果。
@@ -1139,13 +1203,15 @@ fn main() {
     let app = builder
         .invoke_handler(tauri::generate_handler![
             hide_capture_window,
-            take_note_request,
+            open_capture_window_command,
+            take_widget_command,
+            notify_widget_refresh,
             report_note_result,
             collapse_widget,
             save_widget_position,
         ])
-        // 「记一笔」热键的待处理标记。页面在窗口获得焦点后轮询取走它。
-        .manage(NoteRequest(std::sync::atomic::AtomicBool::new(false)))
+        // 悬浮组件的指令槽（进入输入 / 重画 / 选焦点）。
+        .manage(WidgetCommandSlot::new())
         // 悬浮组件是否为输入态。窗口失焦时要据此决定"收起"还是"什么都不做"。
         .manage(WidgetMode(std::sync::atomic::AtomicBool::new(false)))
         // "窗口动过、位置还没落盘"的标记（拖动时节流用）。

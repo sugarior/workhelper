@@ -3,6 +3,7 @@
 
 import { api } from '/api.js';
 import { el, mount, shortId, flash } from '/dom.js';
+import { inShell, invokeShell } from '/ipc.js';
 import {
   renderInbox, renderAll, renderToday, renderProjects, renderLog, renderTrash, renderMaterials,
   renderFocusBar, focusNoteInput, setRefreshHook,
@@ -104,7 +105,18 @@ tabsBox.addEventListener('click', (event) => {
 });
 
 document.getElementById('quick-capture').addEventListener('click', () => {
-  window.open('/capture', 'wh-capture', 'width=680,height=330,menubar=no,toolbar=no');
+  // **必须走外壳命令，不能用 `window.open`** ——
+  // 后者在浏览器里能用，在 Tauri 的 WebView 里被拦截（Tauri 默认不允许网页开新窗口），
+  // 表现成"点了没反应"。这正是"同一件事两条路、其中一条不通"的典型形态。
+  //
+  // 外壳里那个命令与全局热键调的是**同一个函数**，
+  // 因此按钮与热键是同一个动作的两个位置，不是两套实现。
+  // 浏览器里开发时 `invokeShell` 静默失败，此时退回 window.open 保持可用。
+  if (inShell()) {
+    void invokeShell('open_capture_window_command');
+  } else {
+    window.open('/capture', 'wh-capture', 'width=680,height=330,menubar=no,toolbar=no');
+  }
 });
 
 // 回收站入口（需求 F-21b）：右上角，与页签同一行但不占页签位。

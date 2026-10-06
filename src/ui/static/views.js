@@ -4,6 +4,7 @@
 // 任何业务判断（能否流转、是否阻塞、汇总口径）都在内核里。
 
 import { api } from '/api.js';
+import { notifyWidget } from '/ipc.js';
 import {
   el, mount, clear, shortId, todayDayKey, timeOf, dateTimeOf, flash, withBusy,
   STATUS_MARK, PROGRESS_LABEL,
@@ -659,14 +660,19 @@ function buildTaskRow(task, dayKey, extraTag, onChanged) {
 
   // 聚焦（F-15b）：只能落在 doing 上，所以 todo 会先自动转进行中；
   // 已经是当前焦点的任务显示"取消聚焦"。
+  //
+  // 两处都调 `notifyWidget()`：**切焦点后悬浮组件不会自己知道**，
+  // 它会一直显示旧任务。通知走外壳转发（见 ipc.js）。
   if (task.focusedAt !== null) {
     actions.push(push('取消聚焦', async () => {
       await api.unfocus();
+      notifyWidget();
       await onChanged();
     }));
   } else if (task.status !== 'done' && task.status !== 'cancelled') {
     actions.push(push('聚焦', async () => {
       await api.focusTask(task.id);
+      notifyWidget();
       flash('已聚焦，顶部可以直接记一笔');
       await onChanged();
     }));
@@ -1226,6 +1232,7 @@ export async function renderFocusBar(root, onChanged) {
           void withBusy(event.target, async () => {
             // todo 会被内核自动转成进行中 —— 这正是"选中即开始"
             await api.focusTask(item.id);
+            notifyWidget();
             flash(item.status === 'todo' ? '已开始并聚焦' : '已切换聚焦');
             await onChanged();
           });
@@ -1252,6 +1259,7 @@ export async function renderFocusBar(root, onChanged) {
       title: '取消聚焦（任务仍留在「进行中」里）',
       onclick: (event) => void withBusy(event.target, async () => {
         await api.unfocus();
+        notifyWidget();
         flash('已取消聚焦');
         await onChanged();
       }),

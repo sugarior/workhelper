@@ -7,7 +7,7 @@
   <!-- 复用同一份 app.css（里面已有 `.widget-*` 段）。
        不另开一个 widget.css：两个样式表会各自定义变量与基础规则，
        迟早出现"同一处在两处定义"的背离。 -->
-  <link rel="stylesheet" href="/app.css?v=0.19.0">
+  <link rel="stylesheet" href="/app.css?v=0.20.0">
 </head>
 <body class="widget">
   <!-- 悬浮小组件（需求 F-17）。
@@ -57,6 +57,17 @@
 
   <div class="widget-error" id="error"></div>
 
-  <script type="module" src="/widget.js?v=0.19.0"></script>
+  <!-- 选焦点模式：没有焦点任务时按热键走到这里。
+       把"缺一个聚焦目标"这一步直接补上，而不是显示一句"你做不了"。
+       候选来自 focusCandidates()，与主界面聚焦条的下拉**同一份数据**。 -->
+  <div class="widget-pick" id="pick">
+    <div class="widget-pick-title">
+      记到哪一件？
+      <span class="widget-pick-hint">↑↓ 选择 · Enter 确认 · Esc 取消</span>
+    </div>
+    <ul class="widget-pick-list" id="pickList"></ul>
+  </div>
+
+  <script type="module" src="/widget.js?v=0.20.0"></script>
 </body>
 </html>
