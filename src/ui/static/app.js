@@ -7,6 +7,9 @@ import { inShell, invokeShell } from '/ipc.js';
 import {
   renderInbox, renderAll, renderToday, renderProjects, renderLog, renderTrash, renderMaterials,
   renderFocusBar, focusNoteInput, setRefreshHook,
+  // 搜索结果定位（F-15）：路由与"渲染后高亮"都在 views.js 里 ——
+  // 它才知道 allMode 之类的模块状态，也知道每个实体由谁画出来。
+  canLocate, prepareLocate, applyPendingHighlight,
 } from '/views.js';
 
 const viewBox = document.getElementById('view');
@@ -149,20 +152,71 @@ async function runSearch() {
     }
     mount(viewBox, [
       el('h2', {}, ['搜索结果 ', el('span', { class: 'count' }, `共 ${hits.length} 条`)]),
-      el('ul', { class: 'list' }, hits.map((hit) => el('li', {}, [
-        el('span', { class: 'tag' }, hit.entityLabel),
-        el('div', { class: 'item-body' }, [
-          el('div', { class: 'item-title' }, hit.displayTitle || hit.body || '（无标题）'),
-          el('div', { class: 'item-meta' }, [
-            el('span', {}, shortId(hit.entityId)),
-            hit.alive ? null : el('span', { class: 'tag blocked' }, '索引残留'),
-          ]),
-        ]),
-      ]))),
+      el('ul', { class: 'list' }, hits.map((hit) => buildSearchRow(hit))),
     ]);
   } catch (error) {
     mount(viewBox, el('div', { class: 'empty' }, `搜索失败：${error.message}`));
   }
+}
+
+/**
+ * 一条搜索结果。
+ *
+ * **可定位的做成按钮，不可定位的保持纯文本** —— 这是本函数最重要的决定。
+ *
+ * 搜索结果里有 7 类实体，而本轮只支持其中 3 类（收件箱/资料/任务）。
+ * 若把全部结果都做成可点击的，点另外 4 类就会**毫无反应** ——
+ * 那正是需求 F-05 明确要避免的形态（"按了没反应"是最难排查的）。
+ * 因此这里按能力区分：能跳的给按钮样式与悬停提示，不能跳的明说一句。
+ */
+function buildSearchRow(hit) {
+  const locatable = canLocate(hit.entityType);
+  const body = el('div', { class: 'item-body' }, [
+    el('div', { class: 'item-title' }, hit.displayTitle || hit.body || '（无标题）'),
+    el('div', { class: 'item-meta' }, [
+      el('span', {}, shortId(hit.entityId)),
+      hit.alive ? null : el('span', { class: 'tag blocked' }, '索引残留'),
+      locatable
+        ? el('span', { class: 'search-go' }, '点击定位 →')
+        : el('span', { class: 'search-no-go' }, `「${hit.entityLabel}」暂不支持定位`),
+    ]),
+  ]);
+
+  if (!locatable) {
+    return el('li', {}, [el('span', { class: 'tag' }, hit.entityLabel), body]);
+  }
+
+  return el('li', {}, [
+    el('span', { class: 'tag' }, hit.entityLabel),
+    el('button', {
+      class: 'search-hit',
+      title: `跳到「${hit.entityLabel}」并高亮这一条`,
+      onclick: () => void locateSearchHit(hit),
+    }, body),
+  ]);
+}
+
+/**
+ * 跳到某条搜索结果所在的位置并高亮它。
+ *
+ * 这一步要**先问 views.js 该去哪个页签**（它知道 `allMode` 之类的模块状态），
+ * 因此顺序是：问路由 → 切页签并渲染 → 由 views.js 在渲染后定位高亮。
+ */
+async function locateSearchHit(hit) {
+  const plan = await prepareLocate(hit.entityType, hit.entityId);
+  if (plan === null) {
+    flash(`「${hit.entityLabel}」暂不支持定位`, 'error');
+    return;
+  }
+
+  // 让搜索框让出位置：否则下一次刷新会又跳回搜索结果
+  searchInput.value = '';
+
+  await render(plan.tab);
+  if (plan.modeNote !== null) flash(plan.modeNote);
+
+  // **必须在 render 之后**：目标行是这次渲染刚建出来的，之前不存在
+  applyPendingHighlight();
 }
 
 searchInput.addEventListener('input', () => {

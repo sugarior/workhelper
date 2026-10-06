@@ -12,6 +12,172 @@ import {
 
 // 由 app.js 注入的上层重绘函数，避免 views ←→ app 循环 import
 let onDataChanged = () => {};
+
+// ============================================================
+// 搜索结果定位（需求 F-15）
+// ============================================================
+//
+// **为什么要放在本文件**：它需要知道 `allMode`、`materialOrphanOnly` 这些
+// 模块级状态，也需要知道每个实体由哪个渲染函数画出来 —— 这些都在这里。
+// 放在 app.js 就得把它们导出或用别的办法跨文件共享，反而更绕。
+// app.js 只负责"切页签"这件外壳的事，路由与定位在这里。
+
+/**
+ * 待定位的目标。`null` 表示没有。
+ *
+ * **为什么要跨一次渲染保存**：点击搜索结果时当前页还是搜索页，
+ * 要先把页签切过去、等那个视图渲染完，才能去 DOM 里找那一行。
+ * 因此目标必须活过一次渲染。
+ */
+let pendingTarget = null;
+
+/** 切到「全部」页签时要用的模式；`null` 表示不动 */
+const PENDING_MODE_NONE = null;
+
+/**
+ * 路由表：实体类型 → 它住在哪个页签、要不要先切模式。
+ *
+ * **放一张表而不是散在 if 里**：将来加实体类型时只需加一行，
+ * 不会漏掉某个分支 —— 这类"漏了同步扩展"是本项目的常见错误形态。
+ *
+ * **本轮只覆盖"一定看得见"的三类**（用户确认的子集）：
+ * 收件箱、资料、任务。子任务/项目在项目树里折叠、进展在任务时间线里折叠，
+ * 都需要"展开祖先"的机制，留到下一轮。
+ */
+export const SEARCH_ROUTES = {
+  inbox: { tab: 'inbox', label: '收件箱' },
+  // 资料：`archive_items` 就是资料表，因此 entityId 直接就是 material id，无需换算
+  archive: { tab: 'materials', label: '资料' },
+  // 任务：显示台账本的页签有三种模式，稍后按任务状态决定切到哪一种
+  task: { tab: 'all', label: '全部' },
+};
+
+/** 该实体类型本轮是否支持定位。不支持的在搜索结果里不显示为可点击。 */
+export function canLocate(entityType) {
+  return Object.hasOwn(SEARCH_ROUTES, entityType);
+}
+
+/**
+ * 点击搜索结果：记下目标，并返回该切到哪个页签。
+ *
+ * **切模式在这里做，而不是等渲染后**：模式决定了那一次渲染取哪些数据，
+ * 渲染完再切就得多渲染一次，而且中间会闪一下空列表。
+ *
+ * 返回 `{ tab, modeNote }`：`modeNote` 非空时由 app.js 显示一句说明 ——
+ * **必须说**，否则用户会困惑"我的筛选怎么变了"。
+ */
+export async function prepareLocate(entityType, entityId) {
+  const route = SEARCH_ROUTES[entityType];
+  if (route === undefined) return null;
+
+  pendingTarget = { entityType, entityId };
+  let modeNote = null;
+
+  if (entityType === 'task') {
+    // 任务的三种模式：命中一个"已完成/已中止"的任务时，若当前是"全部未结束"，
+    // 跳过去会看到**一个不含它的列表** —— 那比不做定位更糟（点了个空）。
+    // 因此按任务真实状态切到对应模式，并说一声。
+    const wanted = await taskModeFor(entityId);
+    if (wanted !== null && wanted !== allMode) {
+      allMode = wanted;
+      modeNote = `已切到「${ALL_MODE_LABEL[wanted]}」以便定位`;
+    }
+  }
+
+  if (entityType === 'archive' && materialOrphanOnly) {
+    // 资料页的"仅未挂靠"筛选会把已挂靠的资料挡掉
+    materialOrphanOnly = false;
+    modeNote = '已取消「仅未挂靠」筛选以便定位';
+  }
+
+  return { tab: route.tab, modeNote };
+}
+
+const ALL_MODE_LABEL = { open: '全部未结束', done: '已完成', aborted: '已中止' };
+
+/**
+ * 查任务处于哪一类，决定「全部」页该用哪种模式。查不到就返回 null（不动模式）。
+ *
+ * **为什么逐个视图查而不是直接问内核要状态**：界面上服务门面之外没有"按 id 查状态"
+ * 的方法（白名单是有意收窄的）。三个视图接口本来就是"哪些任务属于哪一类"的
+ * 权威答案，用它判断顺带保证了**判断口径与显示口径一致** ——
+ * 若自己另写一套规则，迟早出现"跳过去了但列表里没有"。
+ */
+async function taskModeFor(taskId) {
+  try {
+    const open = await api.openTasksView();
+    const inOpen = collectViewIds(open).has(taskId);
+    if (inOpen) return 'open';
+
+    // 不传 range 时内核用默认范围（最近一段时间）
+    const done = await api.completedView({});
+    if (collectViewIds(done).has(taskId)) return 'done';
+
+    const aborted = await api.abortedView({});
+    if (collectViewIds(aborted).has(taskId)) return 'aborted';
+  } catch {
+    // 查不到就**不动模式**：宁可让用户自己切，也不要擅自切到一个也不含它的模式
+  }
+  return null;
+}
+
+/** 从各视图的返回结构里收集全部任务 id（结构因视图而异，因此宽收） */
+function collectViewIds(view) {
+  const ids = new Set();
+  const walk = (node) => {
+    if (node === null || node === undefined) return;
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item);
+      return;
+    }
+    if (typeof node !== 'object') return;
+    if (typeof node.id === 'string') ids.add(node.id);
+    for (const value of Object.values(node)) walk(value);
+  };
+  walk(view);
+  return ids;
+}
+
+/**
+ * 渲染完成后调用：滚动到目标行并短暂高亮。
+ *
+ * **渲染后调用是必须的**：行是这次渲染刚建出来的，之前根本不存在。
+ * **高亮是短暂的**：它只是"它在这儿"的指路，不该永久改变页面长相。
+ *
+ * **找不到时必须说清"它去哪了"**，而不是笼统地说"找不到"：
+ * 实测踩到的最常见情形是**收件箱条目已经转出** —— 搜索索引还留着它，
+ * 但收件箱只显示待处理条目，因此它当然不在那里。
+ * 若只说"没能定位"，用户会以为是功能坏了；说"它已转出"才是答案。
+ * （这类"索引里有、列表里没有"的落差是搜索与视图口径不同带来的必然结果，
+ *   不是 bug —— 但**必须解释**，否则就是一个让人困惑的死路。）
+ */
+export function applyPendingHighlight() {
+  const target = pendingTarget;
+  pendingTarget = null;
+  if (target === null) return false;
+
+  const row = document.querySelector(`[data-row-id="${CSS.escape(target.entityId)}"]`);
+  if (row === null) {
+    flash(explainMissing(target), 'error');
+    return false;
+  }
+
+  // 居中而不是贴顶：贴顶时目标容易落在视觉焦点之外，还得自己找
+  row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  row.classList.add('row-flash');
+  // 动画结束后移除类，让它可以被再次触发（同一个类不加两次不会重放动画）
+  window.setTimeout(() => row.classList.remove('row-flash'), 1500);
+  return true;
+}
+
+/** 目标不在当前视图里时，尽量说清原因。 */
+function explainMissing(target) {
+  const what = SEARCH_ROUTES[target.entityType]?.label ?? '这条';
+  if (target.entityType === 'inbox') {
+    return '这条收件箱记录已转出（变成任务或资料），因此不在收件箱里了 —— 可以在「全部」或「资料」里找到它';
+  }
+  return `${what}里没有找到它 —— 它可能已被处理，或不在当前筛选范围内`;
+}
 export function setRefreshHook(fn) {
   onDataChanged = fn;
 }
@@ -304,7 +470,9 @@ export async function renderInbox(root) {
     if (item.rawInput !== null) meta.push(el('span', { class: 'item-raw' }, `原文：${item.rawInput}`));
     meta.push(el('span', {}, shortId(item.id)));
 
-    return el('li', {}, [
+    // 定位锚点用**真实 id**（`item.id`），而不是这个视图里那个索引式的 `idx-N` ——
+    // 后者随筛选与排序变化，从搜索结果跳过来时对不上。
+    return el('li', { 'data-row-id': item.id }, [
       checkbox,
       el('div', { class: 'item-body' }, [
         el('div', { class: 'item-title' }, item.body),
@@ -439,7 +607,8 @@ async function renderAborted(root, switcher) {
       el('h2', { class: 'section-title' }, [
         group.dayKey, el('span', { class: 'count' }, `${group.entries.length} 条`),
       ]),
-      el('ul', { class: 'list' }, group.entries.map((entry) => el('li', {}, [
+      // 定位锚点：与"已完成"同理 —— 这一页也是自己构造行，必须单独加
+      el('ul', { class: 'list' }, group.entries.map((entry) => el('li', { 'data-row-id': entry.id }, [
         el('span', {}, '⊘'),
         el('div', { class: 'item-body' }, [
           el('div', { class: 'item-title' }, entry.title),
@@ -570,7 +739,10 @@ async function renderCompleted(root, switcher) {
     if (entry.kind === 'subtask' && entry.taskTitle !== null) {
       meta.push(el('span', { class: 'item-raw' }, `属于：${entry.taskTitle}`));
     }
-    return el('li', {}, [
+    // 定位锚点：这一页用的是**自己的行构造**（不走 buildTaskRow），
+    // 因此必须单独加 —— 否则"搜到已完成的任务 → 跳过来"会找不到那一行
+    // （实测踩到：模式切对了、行也在，就是没有 data-row-id）。
+    return el('li', { 'data-row-id': entry.id }, [
       el('span', {}, '☑'),
       el('div', { class: 'item-body' }, [
         el('div', { class: 'item-title' }, entry.title),
@@ -792,7 +964,10 @@ function buildTaskRow(task, dayKey, extraTag, onChanged) {
     },
   ]));
 
-  return el('li', {}, [
+  // `data-row-id` 是**搜索结果定位的锚点** —— 没有它，跳过来也不知道高亮哪一行。
+  // 用属性而不是 CSS 选择器拼 id：id 由 UUID 而来，拼进选择器要处理转义，
+  // 而属性值比较没有这个问题。
+  return el('li', { 'data-row-id': task.id }, [
     el('span', {}, STATUS_MARK[task.status] ?? '·'),
     el('div', { class: 'item-body' }, [
       el('div', { class: 'item-title' }, task.title),
@@ -1714,7 +1889,9 @@ function materialRow(material, options, onChanged) {
     }, '删除'),
   ]);
 
-  return el('li', {}, [body, actions]);
+  // 资料行的定位锚点。**资料的 id 就是 `archive_items.id`**（资料表就是它），
+  // 而搜索结果里 `archive` 类型的 entityId 也是同一个值 —— 因此不需要换算。
+  return el('li', { 'data-row-id': material.id }, [body, actions]);
 }
 
 /** 资料页签的当前筛选（页面内保留，切走再回来不跳回默认项） */
