@@ -1,9 +1,8 @@
-﻿{
+{
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "工作秘书",
   "version": "0.2.0",
-  "identifier": "com.workhelper.desktop",
-  "build": {
+  "identifier": "com.workhelper.desktop",  "build": {
     "frontendDist": "../../src/ui/static",
     "beforeBuildCommand": "node ../../scripts/prepare-resources.mjs"
   },
