@@ -60,11 +60,28 @@ fn find_repo_root() -> Result<PathBuf, String> {
     ))
 }
 
-/// 找 node 可执行文件：先 PATH，再几个常见安装位置。
+/// 找 node 可执行文件。
 ///
-/// 为什么不写死路径：node 可能是 nvm、官方安装包、或像本机这样的自定义目录（D:\AppGallery）。
-/// 写死一处，换台机器就崩。
-fn find_node() -> Result<PathBuf, String> {
+/// **优先随包 Node，其次系统 Node** —— 顺序不能反：
+/// 若先查系统，那么"打包时漏掉 Node"就**测不出来**（它会静默用系统的跑起来）。
+/// 见 plan §4.1.1「让依赖无法隐藏」。
+///
+/// 开发态没有随包 Node（由 `scripts/prepare-resources.mjs` 在打包前生成），
+/// 因此会落到系统查找分支 —— 这是有意的：开发时改了内核无需重新准备资源。
+fn find_node(resources_dir: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(dir) = resources_dir {
+        let bundled = dir.join("node").join("node.exe");
+        if bundled.is_file() {
+            return Ok(bundled);
+        }
+        // 打包态却没有随包 Node —— 这是安装损坏，必须明确报错而不是回退到系统。
+        // 静默回退会掩盖打包缺陷，那正是 §4.1.1 要防的。
+        return Err(format!(
+            "打包形态下找不到随包的 Node：期望 {} 存在。安装可能不完整，建议重新安装。",
+            bundled.display()
+        ));
+    }
+
     if let Ok(path) = which::which("node") {
         return Ok(path);
     }
@@ -79,7 +96,7 @@ fn find_node() -> Result<PathBuf, String> {
             return Ok(path.to_path_buf());
         }
     }
-    Err("找不到 node.exe：PATH 与常见安装位置都没有".to_string())
+    Err("找不到 node.exe：既没有随包 Node，系统 PATH 与常见安装位置也没有".to_string())
 }
 
 /// 端口是否已被占用（本次实验据此判断该不该由自己拉起内核）。
@@ -107,7 +124,7 @@ fn wait_until_ready(started: Instant) -> Result<Duration, String> {
 
 /// 拉起内核服务，返回子进程。
 fn spawn_kernel(paths: &RuntimePaths) -> Result<Child, String> {
-    let node = find_node()?;
+    let node = find_node(paths.resources_dir.as_deref())?;
     let entry = paths.kernel_root.join("src").join("ui").join("main.ts");
     if !entry.is_file() {
         return Err(format!("内核入口不存在：{}", entry.display()));
@@ -297,10 +314,12 @@ fn open_capture_window(app: &tauri::AppHandle) {
 /// 应用名，用于 `%APPDATA%` 下的目录名与配置文件位置。
 const APP_DIR_NAME: &str = "WorkHelper";
 
-/// 内存中的自检结果（B3-3 会扩充），这里先承载数据目录的解析结果。
+/// 内存中的运行时路径解析结果。
 struct RuntimePaths {
     /// 内核源码树所在目录（含 `src/ui/main.ts` 的那一级）
     kernel_root: PathBuf,
+    /// 资源目录。**仅打包态有值** —— 它同时是"该不该用随包 Node"的判据
+    resources_dir: Option<PathBuf>,
     /// 数据目录（已确保存在且可写）
     data_dir: PathBuf,
     /// 开发态还是打包态
@@ -309,23 +328,27 @@ struct RuntimePaths {
 
 /// 判断是开发态还是打包态。
 ///
-/// **判据：编译时注入的仓库根是否仍然存在**（`build.rs` 写入的 `WORKHELPER_REPO_ROOT`）。
-/// 它存在且包含 `shell/src-tauri/Cargo.toml` → 开发态；否则 → 打包态。
+/// **判据：可执行文件旁边的 `resources/src/ui/main.ts` 是否存在。**
 ///
-/// **为什么不能从可执行文件向上找**：`target-dir` 被指到 `D:/cargo-target/`（为了不撑爆 C 盘），
-/// 于是可执行文件在 `D:\cargo-target\...\debug\`，**与仓库根没有共同祖先** ——
-/// 从它上溯永远找不到 `shell/`。这个坑本文件里已经栽过两次
-/// （`find_repo_root` 与 `target-dir` 归位），所以判据一律以**编译时注入**为准。
+/// 这是**唯一与构建机无关**的判据。踩过的坑：
+///   1. 从可执行文件向上找 `shell/src-tauri/Cargo.toml` —— 失败，
+///      因为 `target-dir` 在 `D:/cargo-target/`，与仓库根没有共同祖先
+///   2. 用"编译时注入的仓库根是否存在" —— 也失败，而且**更隐蔽**：
+///      打包产物是在开发机上构建的，那个路径在构建机上**当然存在**，
+///      于是打包版永远被判成开发态、永远用系统 Node。
+///      在开发机上永远测不出来，装到别人机器上才炸。
 ///
-/// 判错的方向很重要：把打包态误判成开发态会导致写 `Program Files` 失败，
-/// 因此这里的条件要求**同时**满足"路径存在"与"含 Cargo.toml"，宁可偏向判为打包态。
+/// 资源目录是安装布局独有的，与环境变量、构建路径、当前目录都无关。
+///
+/// **判错方向**：把打包态误判成开发态会导致用系统 Node（在别人机器上直接失败）；
+/// 把开发态误判成打包态会导致找不到资源而报错。两者都吵，但前者更晚暴露 ——
+/// 所以判据宁可偏向"看资源目录存不存在"这个客观事实。
 fn detect_dev_mode() -> bool {
-    let Some(root) = option_env!("WORKHELPER_REPO_ROOT") else {
-        return false;
+    let Ok(exe) = std::env::current_exe() else {
+        return true; // 取不到自身路径只可能是异常环境，按开发态处理以便暴露问题
     };
-    let path = Path::new(root);
-    path.join("shell").join("src-tauri").join("Cargo.toml").is_file()
-        && path.join("src").join("ui").join("main.ts").is_file()
+    let Some(dir) = exe.parent() else { return true };
+    !dir.join("resources").join("src").join("ui").join("main.ts").is_file()
 }
 
 /// `%APPDATA%\WorkHelper`，即配置与（默认）数据的根。取不到就退回用户主目录。
@@ -390,23 +413,25 @@ fn ensure_writable(dir: &Path) -> Result<(), String> {
 fn resolve_runtime_paths() -> Result<RuntimePaths, String> {
     let dev = detect_dev_mode();
 
-    // 内核源码树：
+    // 内核源码树与资源目录：
     //   开发态 —— 编译时注入的仓库根
-    //   打包态 —— <可执行文件目录>\resources（B3-3 会把 src/ 打进去）
-    let kernel_root = if dev {
-        find_repo_root()?
+    //   打包态 —— <可执行文件目录>\resources（含 node/ 与 src/）
+    let (kernel_root, resources_dir) = if dev {
+        (find_repo_root()?, None)
     } else {
         let exe = std::env::current_exe().map_err(|e| format!("取不到自身路径：{e}"))?;
         let dir = exe.parent().ok_or("可执行文件没有父目录")?.to_path_buf();
         let resources = dir.join("resources");
-        if resources.join("src").join("ui").join("main.ts").is_file() {
-            resources
-        } else {
+        let entry = resources.join("src").join("ui").join("main.ts");
+        if !entry.is_file() {
             return Err(format!(
                 "打包形态下找不到内核资源：期望 {} 存在。安装可能不完整，建议重新安装。",
-                resources.join("src").join("ui").join("main.ts").display()
+                entry.display()
             ));
         }
+        // 内核根就是 resources：内核用 import.meta.dirname 推导它自己的相对基准，
+        // 而项目里所有对内核根的引用都以 "src/..." 为前缀（含编译时注入的那份）
+        (resources.clone(), Some(resources))
     };
 
     // 数据目录优先级：用户配置 > 形态默认值
@@ -426,7 +451,7 @@ fn resolve_runtime_paths() -> Result<RuntimePaths, String> {
     });
     ensure_writable(&data_dir)?;
 
-    Ok(RuntimePaths { kernel_root, data_dir, dev })
+    Ok(RuntimePaths { kernel_root, resources_dir, data_dir, dev })
 }
 
 fn main() {
@@ -444,6 +469,13 @@ fn main() {
         if paths.dev { "开发态" } else { "打包态" }
     );
     println!("[shell] 内核根目录 = {}", paths.kernel_root.display());
+    println!(
+        "[shell] 随包 Node  = {}",
+        match &paths.resources_dir {
+            Some(dir) => dir.join("node").join("node.exe").display().to_string(),
+            None => "（开发态，用系统 Node）".to_string(),
+        }
+    );
     println!("[shell] 数据目录   = {}", paths.data_dir.display());
 
     // 端口已被占用时不重复拉起 —— 内核是单实例设计，
