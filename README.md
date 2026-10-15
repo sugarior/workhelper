@@ -4,6 +4,22 @@
 由它（必要时借 AI）把混乱输入整理成**项目 → 任务 → 子任务**的可执行结构，
 并把每次推进与每日日志沉淀成可导出的事实源。
 
+## 下载
+
+**[工作秘书 安装包（Windows x64）](https://github.com/sugarior/workhelper/releases/latest)**
+—— 按用户安装，**不需要管理员权限**；装完常驻托盘。
+
+| 要求 | 说明 |
+| --- | --- |
+| 系统 | Windows 10 / 11 x64（需 WebView2 运行时，Windows 11 自带）|
+| 数据位置 | `%APPDATA%\WorkHelper\data\workhelper.db` —— **单一 SQLite 文件，完全本地，不联网** |
+
+> **这是个人工具**，界面与交互是按我自己的工作方式做的，可能不适合所有人。
+> 已知限制见 [Release 说明](https://github.com/sugarior/workhelper/releases/latest)，
+> 其中最实际的一条：**常驻内存约 590MB**（WebView2 每个窗口一套渲染进程的固有开销）。
+
+想从源码跑、或改代码，见 [开发环境搭建](docs/development-setup.md)。
+
 ## 当前状态
 
 **M1 已完成**：M0 的内核 + 图形界面之上，桌面外壳（Tauri 2）已具备

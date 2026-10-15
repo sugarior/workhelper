@@ -18,6 +18,22 @@ out/
 src-tauri/target/
 *.log
 
+# 打包产物。**发布走 GitHub Releases，不进仓库**：
+# 安装包 27MB，二进制无法有效增量，进仓库等于每发一版永久涨 27MB（历史删不掉）。
+# 本项目已经因为提交了 100MB 的 node.exe 让仓库从 0.7MB 涨到 44.6MB，
+# 最后靠重写历史才清掉 —— 这几行是防同类事故的。
+#
+# 正常情况下安装包在 target-dir（仓库外），git 本就看不到；
+# 这几行防的是"有人把它拷进仓库目录"。
+*.exe
+*.msi
+*.msix
+*.dmg
+*.deb
+*.AppImage
+release/
+bundle/
+
 # 备份与快照
 backups/
 *.bak
