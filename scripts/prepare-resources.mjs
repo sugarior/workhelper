@@ -9,7 +9,7 @@
 // 而这部分内容**只在系统 Node 升级或内核代码改动时才需要更新**（内核那部分只有 439KB，
 // 且当前由 Tauri 直接从 resources/src 打包）。做成显式命令，构建快、行为可预期。
 
-import { cpSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { cpSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,6 +43,33 @@ console.log(`资源目录 : ${RESOURCES}`);
 const srcOnly = process.argv.includes('--src-only');
 
 console.log(`模式     : ${srcOnly ? '仅刷新 src（跳过 node.exe）' : '完整'}`);
+
+/**
+ * 重建 `resources/.gitignore`。
+ *
+ * **为什么必须在这里主动写**：本脚本会先删掉整个 `resources/` 目录（下面 `rmSync`），
+ * 那会连 `.gitignore` 一起删掉 —— 忽略规则随之消失，整个目录（含 100MB 的 node.exe）
+ * 在下一次 `git add -A` 时就成了"新增文件"。
+ *
+ * **这不是假想**：确实发生过一次，仓库从 0.7MB 涨到 44.6MB，
+ * 最后靠重写历史才清掉。只靠"记得别删"是记不住的，所以让脚本自己保证。
+ */
+function ensureGitignore() {
+  const content = `# 资源目录是**可再生产物**，不进版本库（本文件由 prepare-resources.mjs 自动生成）。
+#
+#   · node/node.exe —— 从系统 Node 复制（约 100MB）
+#   · src/          —— 从仓库根 src/ 复制，与已跟踪的 src/ 是同一内容的两份副本
+#
+# 曾经被误提交过一次（含 104MB 的 node.exe），仓库因此从 0.7MB 涨到 44.6MB，
+# 后来重写历史才清掉。根因就是这个目录会被整体删除重建 —— 所以这里每次都写回。
+*
+!.gitignore
+`;
+  mkdirSync(RESOURCES, { recursive: true });
+  writeFileSync(join(RESOURCES, '.gitignore'), content);
+}
+
+ensureGitignore();
 
 // 1. Node 运行时
 const nodeDir = join(RESOURCES, 'node');
