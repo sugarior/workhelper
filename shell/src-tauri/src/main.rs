@@ -94,10 +94,14 @@ fn find_node(resources_dir: Option<&Path>) -> Result<PathBuf, String> {
     if let Ok(path) = which::which("node") {
         return Ok(path);
     }
+    // 兜底：PATH 里没有时，试官方安装器的默认位置。
+    //
+    // **只列"对任何机器都成立"的位置**。这里曾经还有一条本机的自定义路径
+    // （`D:\AppGallery\node.exe`），那对别人毫无意义，而且会让"PATH 里找不到 Node"
+    // 这个真实问题在本机被悄悄掩盖 —— 换台机器才发现。已删。
     let candidates = [
         r"C:\Program Files\nodejs\node.exe",
         r"C:\Program Files (x86)\nodejs\node.exe",
-        r"D:\AppGallery\node.exe",
     ];
     for candidate in candidates {
         let path = Path::new(candidate);

@@ -593,7 +593,7 @@ F-11~F-14 定义了资料的入口、挂靠、速记与浏览，却从没说"资
 - 日历集成（读取已有日历以避开冲突时段）
 - 划词选中即入队（选中任意程序里的文本 → 快捷键入收件箱）
 - 多设备同步（需先解决冲突合并策略）
-- 对外接口（CLI / MCP），让 DSH 等 Agent 能读写任务——见 §9 待决 Q3
+- 对外接口（CLI / MCP），让 AI Agent 能读写任务——见 §9 待决 Q3
 
 ---
 
@@ -683,7 +683,7 @@ F-11~F-14 定义了资料的入口、挂靠、速记与浏览，却从没说"资
                    │ 可选：CLI / MCP（P2）
 ```
 
-好处很实际：将来想要"在 DSH 里也能登记任务"或"用命令行批量导入"，只需在内核上加一个适配层，不用重写业务逻辑。
+好处很实际：将来想要"让 AI Agent 也能登记任务"或"用命令行批量导入"，只需在内核上加一个适配层，不用重写业务逻辑。
 
 ---
 
@@ -750,7 +750,6 @@ B2 阶段实测后的真实数字：
 | Q2 | 自然语言日期解析 | **做**。仅在高置信度时识别（"下周三 / 明天 / 10月8日"），在浮窗内以浅色截止标签预览；**绝不阻断保存**，识别不到就原样存为标题 |
 | Q5 | 数据目录 | **工程目录下 `data\`**：`data/workhelper.db` + `data/attachments/` + `data/backups/`；必须进 `.gitignore` |
 | — | AI 供应商 | **DeepSeek 官方 API**（按 OpenAI 兼容协议抽象，便于换供应商） |
-| — | 权限/沙箱 | 会话已切至 `danger-full-access`；详见 §11 |
 
 ### 9.2 仍待你确认
 
@@ -842,20 +841,15 @@ R1、R10、R12 是**同一类失败的三次重复**，必须当成一条固定�
 
 ---
 
-## 11. 环境状态（已实测）
+## 11. 开发环境要求（已实测）
 
-| 项 | 状态 | 说明 |
+| 项 | 要求 | 说明 |
 | --- | --- | --- |
-| DSH 文件沙箱 | ✅ 已解决 | 原 `SetNamedSecurityInfoW failed (Win32 5)` 的成因：当前账户为 UAC 过滤令牌（`BUILTIN\Administrators = Group used for deny only`），沙箱无法修改工作区 DACL 来授予受限子进程写权限。会话切至 `danger-full-access` 后**完全绕过沙箱**，命令恢复正常 |
-| Node.js | ✅ v26.10.0（`D:\AppGallery\node.exe`） | **`node:sqlite` 实测可用** → M0 不需要任何需本地编译的依赖 |
-| WebView2 运行时 | ✅ 153.0.4234.48 | Tauri 渲染引擎已就位 |
-| npm | ✅ 11.19.1 | pnpm 12.6.0 正在首次下载 |
-| `git` / `python` / VS Code | ✅ 2.45.1 / 已装 / 已装 | — |
-| **Rust 工具链** | ❌ **缺** | `rustup`/`cargo`/`rustc` 均无 → **M1（接桌面壳）前必须安装** |
-| **MSVC 生成工具** | ❌ **缺** | 无 VS 2022 C++ 工具链，`rustc` 会报 `link.exe not found` → 与 Rust 同批安装 |
-| PowerShell 执行策略 | ⚠️ 全 `Undefined`（等价 Restricted） | `npm.ps1` / `pnpm.ps1` 被拦截；解决：`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
+| **Node.js** | **≥ 22.5**（实测 v26.10.0） | **必须内置 `node:sqlite`** —— 这是"零原生编译依赖"的前提。<br>同时需要**原生运行 TypeScript**（类型剥离） |
+| WebView2 运行时 | Windows 10/11 自带或随系统更新 | Tauri 的渲染引擎 |
+| **Rust 工具链 + MSVC C++ 生成工具** | 仅**重新构建桌面外壳/安装包**时需要 | 只跑内核（`node src/ui/main.ts`）与命令行**完全不需要** |
 
-**结论：M0 无阻塞，可以立刻开工；Rust + MSVC 推迟到 M1 之前安装。**
+**结论：跑起来只需 Node；只有要重新打包才需要 Rust 与 MSVC。**
 
 ---
 
@@ -885,7 +879,6 @@ R1、R10、R12 是**同一类失败的三次重复**，必须当成一条固定�
 | 技术栈决策权 | 由实现方决策 | 本次澄清 |
 | AI 供应商 | **DeepSeek 官方 API**（OpenAI 兼容协议抽象） | 第二轮澄清 |
 | 自然语言日期 | **做**，仅高置信度时在浮窗内提示截止标签 | 第二轮澄清 |
-| 数据目录 | **工程目录下 `data\`**（含 db / attachments / backups），进 `.gitignore` | 第二轮澄清 |
-| 会话权限 | 切至 `danger-full-access`（原因见 §11） | 第二轮澄清 |
+| 数据目录 | 安装后 `%APPDATA%\WorkHelper\data`；开发态 `<项目根>\data`。均进 `.gitignore` | 第二轮澄清 + 打包阶段修正 |
 | SQLite 实现 | **`node:sqlite`**（Node 26 内置，零原生编译依赖） | 环境实测后决策 |
 | 开工顺序 | M0 不装 Rust；Rust + MSVC 推迟到 M1 前 | 环境实测后决策 |
