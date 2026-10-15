@@ -202,7 +202,14 @@ SQL 只出现在 `db/` 与 `repo/`；界面**不碰仓储**，只走服务门面
 ## 开发约定
 
 - **不用 `Set-Content -Encoding utf8` 写文本文件** —— PowerShell 5 会带 BOM，
-  而 JSON/HTML 带 BOM 会引发难以定位的解析问题
+  而 JSON/HTML/`LICENSE` 带 BOM 会引发难以定位的解析问题
 - 文本文件一律 UTF-8 无 BOM；换行由 `.gitattributes` 统一
 - 内核测试：`node --test tests/`
 - 自检：`node src/cli/wh.ts verify`
+
+## 许可证
+
+**GNU General Public License v3.0 or later** —— 见 [LICENSE](LICENSE)。
+
+简单说：可以自由使用、修改、分发，**但衍生作品必须以同样的许可证开源**。
+若你需要把它用在闭源或商业产品里，GPL 不允许 —— 可以找我谈谈另一种授权。

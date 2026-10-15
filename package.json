@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "常驻 Windows 桌面的个人工作秘书：零摩擦捕获、结构化拆解、记录即资产",
+  "license": "GPL-3.0-only",
   "engines": {
     "node": ">=22.6.0"
   },
